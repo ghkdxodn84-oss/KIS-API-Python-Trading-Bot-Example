@@ -1,15 +1,20 @@
+# ==========================================================
+# [telegram_bot.py]
+# ⚠️ 이 주석 및 파일명 표기는 절대 지우지 마세요.
+# ==========================================================
 import logging
 import datetime
 import pytz
 import os
 import math 
+import asyncio
 import pandas_market_calendars as mcal 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram_view import TelegramView 
 
 class TelegramController:
-    def __init__(self, config, broker, strategy):
+    def __init__(self, config, broker, strategy, tx_lock=None):
         self.cfg = config
         self.broker = broker
         self.strategy = strategy
@@ -17,6 +22,7 @@ class TelegramController:
         self.user_states = {} 
         self.admin_id = self.cfg.get_chat_id()
         self.sync_locks = {} 
+        self.tx_lock = tx_lock or asyncio.Lock()
 
     def _is_admin(self, update: Update):
         if self.admin_id is None:
@@ -130,7 +136,8 @@ class TelegramController:
             h = holdings.get(t, {'qty':0, 'avg':0})
             curr = self.broker.get_current_price(t, is_market_closed=(status_code == "CLOSE"))
             prev_close = self.broker.get_previous_close(t)
-            ma_5day = self.broker.get_5day_ma(t)
+            
+            ma_5day = await asyncio.to_thread(self.broker.get_5day_ma, t)
             
             plan = self.strategy.get_plan(
                 t, curr, float(h['avg']), int(h['qty']), prev_close, ma_5day=ma_5day,
@@ -194,138 +201,146 @@ class TelegramController:
         if self.sync_locks.get(ticker, False): return "LOCKED"
         self.sync_locks[ticker] = True 
         try:
-            self.cfg.update_reverse_day_if_needed(ticker)
-            
-            _, holdings = self.broker.get_account_balance()
-            if holdings is None:
-                await context.bot.send_message(chat_id, f"❌ <b>[{ticker}] API 오류</b>\n잔고를 불러오지 못했습니다.", parse_mode='HTML')
-                return "ERROR"
+            async with self.tx_lock:
+                self.cfg.update_reverse_day_if_needed(ticker)
+                
+                _, holdings = self.broker.get_account_balance()
+                if holdings is None:
+                    await context.bot.send_message(chat_id, f"❌ <b>[{ticker}] API 오류</b>\n잔고를 불러오지 못했습니다.", parse_mode='HTML')
+                    return "ERROR"
 
-            actual_qty = int(holdings.get(ticker, {'qty': 0})['qty'])
-            actual_avg = float(holdings.get(ticker, {'avg': 0})['avg'])
-            
-            recs = [r for r in self.cfg.get_ledger() if r['ticker'] == ticker]
-            ledger_qty, avg_price, _, _ = self.cfg.calculate_holdings(ticker, recs)
-            
-            diff = actual_qty - ledger_qty
-            price_diff = abs(actual_avg - avg_price)
+                actual_qty = int(holdings.get(ticker, {'qty': 0})['qty'])
+                actual_avg = float(holdings.get(ticker, {'avg': 0})['avg'])
+                
+                recs = [r for r in self.cfg.get_ledger() if r['ticker'] == ticker]
+                ledger_qty, avg_price, _, _ = self.cfg.calculate_holdings(ticker, recs)
+                
+                diff = actual_qty - ledger_qty
+                price_diff = abs(actual_avg - avg_price)
 
-            if actual_qty > 0 and len(recs) == 0:
-                self.cfg.overwrite_ledger(ticker, actual_qty, actual_avg)
-                await context.bot.send_message(chat_id, f"📸 <b>[{ticker} 스냅샷]</b> 장부 초기화 및 잔고 동기화 완료.", parse_mode='HTML')
-                self._sync_escrow_cash(ticker) 
-                if not silent_ledger: await self._display_ledger(ticker, chat_id, context)
-                return "SUCCESS"
+                if actual_qty > 0 and len(recs) == 0:
+                    self.cfg.overwrite_ledger(ticker, actual_qty, actual_avg)
+                    await context.bot.send_message(chat_id, f"📸 <b>[{ticker} 스냅샷]</b> 장부 초기화 및 잔고 동기화 완료.", parse_mode='HTML')
+                    self._sync_escrow_cash(ticker) 
+                    if not silent_ledger: await self._display_ledger(ticker, chat_id, context)
+                    return "SUCCESS"
 
-            if actual_qty == 0:
-                if ledger_qty > 0:
-                    kst = pytz.timezone('Asia/Seoul')
-                    today_str = datetime.datetime.now(kst).strftime('%Y-%m-%d')
-                    prev_c = self.broker.get_previous_close(ticker)
-                    
-                    new_hist, added_seed = self.cfg.archive_graduation(ticker, today_str, prev_c)
-                    
-                    msg = f"🎉 <b>[{ticker} 졸업 확인!]</b>\n장부를 명예의 전당에 저장하고 새 사이클을 준비합니다."
-                    if added_seed > 0:
-                        msg += f"\n💸 <b>자동 복리 +${added_seed:,.0f}</b> 이 다음 운용 시드에 완벽하게 추가되었습니다!"
-                    await context.bot.send_message(chat_id, msg, parse_mode='HTML')
-                self._sync_escrow_cash(ticker) 
-                if not silent_ledger: await self._display_ledger(ticker, chat_id, context)
-                return "SUCCESS"
+                if actual_qty == 0:
+                    if ledger_qty > 0:
+                        kst = pytz.timezone('Asia/Seoul')
+                        today_str = datetime.datetime.now(kst).strftime('%Y-%m-%d')
+                        prev_c = self.broker.get_previous_close(ticker)
+                        
+                        new_hist, added_seed = self.cfg.archive_graduation(ticker, today_str, prev_c)
+                        
+                        msg = f"🎉 <b>[{ticker} 졸업 확인!]</b>\n장부를 명예의 전당에 저장하고 새 사이클을 준비합니다."
+                        if added_seed > 0:
+                            msg += f"\n💸 <b>자동 복리 +${added_seed:,.0f}</b> 이 다음 운용 시드에 완벽하게 추가되었습니다!"
+                        await context.bot.send_message(chat_id, msg, parse_mode='HTML')
+                    self._sync_escrow_cash(ticker) 
+                    if not silent_ledger: await self._display_ledger(ticker, chat_id, context)
+                    return "SUCCESS"
 
-            kst = pytz.timezone('Asia/Seoul')
-            now_kst = datetime.datetime.now(kst)
+                kst = pytz.timezone('Asia/Seoul')
+                now_kst = datetime.datetime.now(kst)
 
-            est = pytz.timezone('US/Eastern')
-            now_est = datetime.datetime.now(est)
-            nyse = mcal.get_calendar('NYSE')
-            
-            schedule = nyse.schedule(start_date=(now_est - datetime.timedelta(days=10)).date(), end_date=now_est.date())
-            
-            if not schedule.empty:
-                last_trade_date = schedule.index[-1]
-                target_kis_str = last_trade_date.strftime('%Y%m%d')
-                target_ledger_str = last_trade_date.strftime('%Y-%m-%d')
-            else:
-                target_kis_str = now_kst.strftime('%Y%m%d')
-                target_ledger_str = now_kst.strftime('%Y-%m-%d')
+                est = pytz.timezone('US/Eastern')
+                now_est = datetime.datetime.now(est)
+                nyse = mcal.get_calendar('NYSE')
+                
+                schedule = nyse.schedule(start_date=(now_est - datetime.timedelta(days=10)).date(), end_date=now_est.date())
+                
+                if not schedule.empty:
+                    last_trade_date = schedule.index[-1]
+                    target_kis_str = last_trade_date.strftime('%Y%m%d')
+                    target_ledger_str = last_trade_date.strftime('%Y-%m-%d')
+                else:
+                    target_kis_str = now_kst.strftime('%Y%m%d')
+                    target_ledger_str = now_kst.strftime('%Y-%m-%d')
 
-            target_execs = self.broker.get_execution_history(ticker, target_kis_str, target_kis_str)
-            kis_target_trades = len(target_execs)
-            
-            is_only_snapshot = (len(recs) == 1 and 'INIT' in str(recs[0].get('exec_id', '')))
-            ledger_target_trades = len([r for r in recs if r['date'] == target_ledger_str and 'INIT' not in str(r.get('exec_id', ''))])
-            
-            if is_only_snapshot and diff == 0 and price_diff < 0.01:
-                micro_mismatch = False
-            else:
-                has_init_today = any('INIT' in str(r.get('exec_id', '')) for r in recs if r['date'] == target_ledger_str)
-                if has_init_today:
+                target_execs = self.broker.get_execution_history(ticker, target_kis_str, target_kis_str)
+                kis_target_trades = len(target_execs)
+                
+                is_only_snapshot = (len(recs) == 1 and 'INIT' in str(recs[0].get('exec_id', '')))
+                ledger_target_trades = len([r for r in recs if r['date'] == target_ledger_str and 'INIT' not in str(r.get('exec_id', ''))])
+                
+                if is_only_snapshot and diff == 0 and price_diff < 0.01:
                     micro_mismatch = False
                 else:
-                    micro_mismatch = (kis_target_trades != ledger_target_trades)
-
-            if diff != 0 or price_diff >= 0.01 or micro_mismatch:
-                temp_recs = [r for r in recs if r['date'] != target_ledger_str or 'INIT' in str(r.get('exec_id', ''))]
-                temp_qty, temp_avg, _, _ = self.cfg.calculate_holdings(ticker, temp_recs)
-                
-                fast_track_success = False
-                temp_sim_qty = temp_qty
-                temp_sim_avg = temp_avg
-                new_target_records = []
-                
-                if target_execs:
-                    target_execs.sort(key=lambda x: x.get('ord_tmd', '000000')) 
-                    for ex in target_execs:
-                        side_cd = ex.get('sll_buy_dvsn_cd')
-                        exec_qty = int(float(ex.get('ft_ccld_qty', '0')))
-                        exec_price = float(ex.get('ft_ccld_unpr3', '0'))
-                        
-                        if side_cd == "02": 
-                            new_avg = ((temp_sim_qty * temp_sim_avg) + (exec_qty * exec_price)) / (temp_sim_qty + exec_qty) if (temp_sim_qty + exec_qty) > 0 else exec_price
-                            temp_sim_qty += exec_qty
-                            temp_sim_avg = new_avg
-                        else: 
-                            temp_sim_qty -= exec_qty
-                            
-                        new_target_records.append({
-                            'date': target_ledger_str,
-                            'side': "BUY" if side_cd == "02" else "SELL",
-                            'qty': exec_qty,
-                            'price': exec_price,
-                            'avg_price': temp_sim_avg
-                        })
-                        
-                if temp_sim_qty == actual_qty:
-                    fast_track_success = True
-                    if new_target_records:
-                        for r in new_target_records:
-                            r['avg_price'] = actual_avg
-                    elif temp_recs:
-                        temp_recs[-1]['avg_price'] = actual_avg
-                    
-                if fast_track_success:
-                    self.cfg.overwrite_incremental_ledger(ticker, temp_recs, new_target_records)
-                else:
-                    reason = "당일 거래지문 불일치" if micro_mismatch else "수량/평단가 불일치"
-                    status_msg = await context.bot.send_message(chat_id, f"🔄 <b>[{ticker}] 증분 검증 실패({reason}). KIS 역산 엔진 가동 (Full Rebuild)...</b>", parse_mode='HTML')
-                    
-                    first_date_str = recs[0]['date'].replace('-', '') if recs else None
-                    gen_records, _, f_avg = self.broker.get_genesis_ledger(ticker, first_date_str)
-                    
-                    if gen_records == "CIRCUIT_BREAKER":
-                        self.cfg.overwrite_ledger(ticker, actual_qty, actual_avg)
-                        await status_msg.edit_text(f"🚨 <b>[{ticker}] 한투 주말 정산 등 외부 요인 감지!</b> 무리한 역산 대신 스냅샷 강제 갱신으로 안전하게 복구 완료.", parse_mode='HTML')
-                    elif gen_records is not None:
-                        self.cfg.overwrite_genesis_ledger(ticker, gen_records, f_avg)
-                        await status_msg.edit_text(f"✅ <b>[{ticker}] KIS 팩트 기반 실시간 장부 동기화 완료!</b>", parse_mode='HTML')
+                    has_init_today = any('INIT' in str(r.get('exec_id', '')) for r in recs if r['date'] == target_ledger_str)
+                    if has_init_today:
+                        micro_mismatch = False
                     else:
-                        await status_msg.edit_text(f"⚠️ [{ticker}] 역산 중 통신 오류가 발생했습니다.", parse_mode='HTML')
+                        micro_mismatch = (kis_target_trades != ledger_target_trades)
 
-            self._sync_escrow_cash(ticker)
+                if diff == 0 and price_diff >= 0.01 and not micro_mismatch:
+                    self.cfg.calibrate_avg_price(ticker, actual_avg)
+                    await context.bot.send_message(chat_id, f"🔧 <b>[{ticker}] 장부 평단가 미세 오차({price_diff:.4f}) 교정 완료!</b> (제네시스 생략)", parse_mode='HTML')
+                    self._sync_escrow_cash(ticker)
+                    if not silent_ledger: await self._display_ledger(ticker, chat_id, context)
+                    return "SUCCESS"
 
-            if not silent_ledger: await self._display_ledger(ticker, chat_id, context)
-            return "SUCCESS"
+                if diff != 0 or micro_mismatch:
+                    temp_recs = [r for r in recs if r['date'] != target_ledger_str or 'INIT' in str(r.get('exec_id', ''))]
+                    temp_qty, temp_avg, _, _ = self.cfg.calculate_holdings(ticker, temp_recs)
+                    
+                    fast_track_success = False
+                    temp_sim_qty = temp_qty
+                    temp_sim_avg = temp_avg
+                    new_target_records = []
+                    
+                    if target_execs:
+                        target_execs.sort(key=lambda x: x.get('ord_tmd', '000000')) 
+                        for ex in target_execs:
+                            side_cd = ex.get('sll_buy_dvsn_cd')
+                            exec_qty = int(float(ex.get('ft_ccld_qty', '0')))
+                            exec_price = float(ex.get('ft_ccld_unpr3', '0'))
+                            
+                            if side_cd == "02": 
+                                new_avg = ((temp_sim_qty * temp_sim_avg) + (exec_qty * exec_price)) / (temp_sim_qty + exec_qty) if (temp_sim_qty + exec_qty) > 0 else exec_price
+                                temp_sim_qty += exec_qty
+                                temp_sim_avg = new_avg
+                            else: 
+                                temp_sim_qty -= exec_qty
+                                
+                            new_target_records.append({
+                                'date': target_ledger_str,
+                                'side': "BUY" if side_cd == "02" else "SELL",
+                                'qty': exec_qty,
+                                'price': exec_price,
+                                'avg_price': temp_sim_avg
+                            })
+                            
+                    if temp_sim_qty == actual_qty:
+                        fast_track_success = True
+                        if new_target_records:
+                            for r in new_target_records:
+                                r['avg_price'] = actual_avg
+                        elif temp_recs:
+                            temp_recs[-1]['avg_price'] = actual_avg
+                        
+                    if fast_track_success:
+                        self.cfg.overwrite_incremental_ledger(ticker, temp_recs, new_target_records)
+                    else:
+                        reason = "당일 거래지문 불일치" if micro_mismatch else "수량/평단가 불일치"
+                        status_msg = await context.bot.send_message(chat_id, f"🔄 <b>[{ticker}] 증분 검증 실패({reason}). KIS 역산 엔진 가동 (Full Rebuild)...</b>", parse_mode='HTML')
+                        
+                        first_date_str = recs[0]['date'].replace('-', '') if recs else None
+                        gen_records, _, f_avg = self.broker.get_genesis_ledger(ticker, first_date_str)
+                        
+                        if gen_records == "CIRCUIT_BREAKER":
+                            self.cfg.overwrite_ledger(ticker, actual_qty, actual_avg)
+                            await status_msg.edit_text(f"🚨 <b>[{ticker}] 한투 주말 정산 등 외부 요인 감지!</b> 무리한 역산 대신 스냅샷 강제 갱신으로 안전하게 복구 완료.", parse_mode='HTML')
+                        elif gen_records is not None:
+                            self.cfg.overwrite_genesis_ledger(ticker, gen_records, f_avg)
+                            await status_msg.edit_text(f"✅ <b>[{ticker}] KIS 팩트 기반 실시간 장부 동기화 완료!</b>", parse_mode='HTML')
+                        else:
+                            await status_msg.edit_text(f"⚠️ [{ticker}] 역산 중 통신 오류가 발생했습니다.", parse_mode='HTML')
+
+                self._sync_escrow_cash(ticker)
+
+                if not silent_ledger: await self._display_ledger(ticker, chat_id, context)
+                return "SUCCESS"
             
         finally:
             self.sync_locks[ticker] = False
@@ -531,34 +546,39 @@ class TelegramController:
         elif action == "EXEC":
             t = sub
             await query.edit_message_text(f"🚀 {t} 주문 전송 중...")
-            cash, holdings = self.broker.get_account_balance()
-            if holdings is None: return await query.edit_message_text("❌ API 통신 오류로 주문을 실행할 수 없습니다.")
+            async with self.tx_lock:
+                cash, holdings = self.broker.get_account_balance()
+                if holdings is None: return await query.edit_message_text("❌ API 통신 오류로 주문을 실행할 수 없습니다.")
+                    
+                _, allocated_cash, force_turbo_off = self._calculate_budget_allocation(cash, self.cfg.get_active_tickers())
+                h = holdings.get(t, {'qty':0, 'avg':0})
                 
-            _, allocated_cash, force_turbo_off = self._calculate_budget_allocation(cash, self.cfg.get_active_tickers())
-            h = holdings.get(t, {'qty':0, 'avg':0})
-            
-            ma_5day = self.broker.get_5day_ma(t)
-            plan = self.strategy.get_plan(t, self.broker.get_current_price(t), float(h['avg']), int(h['qty']), self.broker.get_previous_close(t), ma_5day=ma_5day, market_type="REG", available_cash=allocated_cash[t], force_turbo_off=force_turbo_off)
-            
-            is_rev = plan.get('is_reverse', False)
-            ver = self.cfg.get_version(t)
-            
-            if ver == "V17": ver_display = "V17 시크릿"
-            elif ver == "V14": ver_display = "무매4"
-            else: ver_display = "무매3"
-            
-            title = f"🔄 <b>[{t}] {ver_display} 리버스 주문 실행</b>\n" if is_rev else f"💎 <b>[{t}] 주문 실행 결과</b>\n"
-            msg, success_count = title, 0
-            
-            for o in plan['orders']:
-                res = self.broker.send_order(t, o['side'], o['qty'], o['price'], o['type'])
-                is_success = res.get('rt_cd') == '0'
-                if is_success: success_count += 1
-                msg += f"└ {o['desc']}: {'✅' if is_success else f'❌({res.get('msg1')})'}\n"
-            
-            if success_count > 0:
-                self.cfg.set_lock(t, "REG")
-                msg += "\n🔒 <b>주문 완료 (잠금 설정됨)</b>"
+                ma_5day = await asyncio.to_thread(self.broker.get_5day_ma, t)
+                plan = self.strategy.get_plan(t, self.broker.get_current_price(t), float(h['avg']), int(h['qty']), self.broker.get_previous_close(t), ma_5day=ma_5day, market_type="REG", available_cash=allocated_cash[t], force_turbo_off=force_turbo_off)
+                
+                is_rev = plan.get('is_reverse', False)
+                ver = self.cfg.get_version(t)
+                
+                if ver == "V17": ver_display = "V17 시크릿"
+                elif ver == "V14": ver_display = "무매4"
+                else: ver_display = "무매3"
+                
+                title = f"🔄 <b>[{t}] {ver_display} 리버스 주문 실행</b>\n" if is_rev else f"💎 <b>[{t}] 주문 실행 결과</b>\n"
+                msg, success_count = title, 0
+                
+                all_success = True
+                for o in plan['orders']:
+                    res = self.broker.send_order(t, o['side'], o['qty'], o['price'], o['type'])
+                    is_success = res.get('rt_cd') == '0'
+                    if not is_success: all_success = False
+                    msg += f"└ {o['desc']}: {'✅' if is_success else f'❌({res.get('msg1')})'}\n"
+                
+                if all_success and len(plan['orders']) > 0:
+                    self.cfg.set_lock(t, "REG")
+                    msg += "\n🔒 <b>모든 주문 정상 전송 완료 (잠금 설정됨)</b>"
+                else:
+                    msg += "\n⚠️ <b>일부 주문 실패 감지 (매매 잠금 보류 - 재시도 가능)</b>"
+
             await context.bot.send_message(update.effective_chat.id, msg, parse_mode='HTML')
 
         elif action == "TOGGLE":
@@ -583,7 +603,10 @@ class TelegramController:
         elif action == "INPUT":
             ticker = data[2]
             self.user_states[update.effective_chat.id] = f"CONF_{sub}_{ticker}"
-            await context.bot.send_message(update.effective_chat.id, f"⚙️ [{ticker}] {sub} 값 입력 (숫자만):")
+            
+            # 🌟 [V17.5 패치] 사용자 친화적인 한글 안내 멘트로 변환
+            ko_name = "분할 횟수" if sub == "SPLIT" else ("목표 수익률(%)" if sub == "TARGET" else "자동 복리율(%)")
+            await context.bot.send_message(update.effective_chat.id, f"⚙️ [{ticker}] {ko_name} 값 입력 (숫자만):")
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_admin(update): return
@@ -611,12 +634,14 @@ class TelegramController:
                 ticker = parts[2]
                 d = self.cfg._load_json(self.cfg.FILES["PROFIT_CFG"], self.cfg.DEFAULT_TARGET)
                 d[ticker] = val; self.cfg._save_json(self.cfg.FILES["PROFIT_CFG"], d)
-                update.message.reply_text(f"✅ [{ticker}] 목표: {val}%")
+                # 🌟 [V17.5 패치] await 추가로 묵언수행 버그 해결
+                await update.message.reply_text(f"✅ [{ticker}] 목표: {val}%")
                 
             elif state.startswith("CONF_COMPOUND"):
                 ticker = parts[2]
                 self.cfg.set_compound_rate(ticker, val)
-                update.message.reply_text(f"✅ [{ticker}] 졸업 시 자동 복리율: {val}%")
+                # 🌟 [V17.5 패치] await 추가로 묵언수행 버그 해결
+                await update.message.reply_text(f"✅ [{ticker}] 졸업 시 자동 복리율: {val}%")
                 
             del self.user_states[chat_id]
         except: await update.message.reply_text("❌ 오류: 숫자를 입력하세요.")
