@@ -1,4 +1,7 @@
-
+# ==========================================================
+# [main.py]
+# ⚠️ 이 주석 및 파일명 표기는 절대 지우지 마세요.
+# ==========================================================
 import os
 import logging
 import datetime
@@ -70,7 +73,7 @@ def is_market_open():
         else:
             return False
     except Exception as e:
-        logging.error(f"⚠️ 달력 라이브러리 에러 발생. 평일이므로 강제 개장 처리합니다: {e}")
+        logging.error(f"⚠️ 달력 라이브러 에러 발생. 평일이므로 강제 개장 처리합니다: {e}")
         return True
 
 def get_budget_allocation(cash, tickers, cfg):
@@ -482,14 +485,12 @@ async def scheduled_sniper_monitor(context):
                     unfilled = await asyncio.to_thread(broker.get_unfilled_orders_detail, t)
                     target_odno = None
                     
-                    # 🚨 [V21.4 핫픽스] KIS API 키 누락 및 불일치에 대비한 다중 식별 시스템 장착
                     for o in unfilled:
                         if o.get('sll_buy_dvsn_cd') == '01':
                             dvsn = o.get('ord_dvsn_cd') or o.get('ord_dvsn') or ''
                             o_price = float(o.get('ft_ord_unpr3', 0))
                             
-                            # 주문구분이 LOC(34)이거나, 혹은 가격이 별값/본전(trigger_price)과 완벽히 일치하면 덫으로 간주
-                            if dvsn == '34' or o_price == trigger_price: 
+                            if dvsn == '34' or o_price == star_price: 
                                 target_odno = o.get('odno')
                                 break
                             

@@ -19,6 +19,10 @@ class InfiniteStrategy:
         smart_bonus_orders = []  
         process_status = "" 
         
+        # 스나이퍼 잠금 상태 실시간 확인
+        lock_s_sell = self.cfg.check_lock(ticker, "SNIPER_SELL")
+        lock_s_buy = self.cfg.check_lock(ticker, "SNIPER_BUY")
+        
         # ==========================================================
         # 🛡️ [V18.13 패치] KIS 자전거래(Wash-Trade) 원천 차단 방어벽 엔진
         # ==========================================================
@@ -42,7 +46,7 @@ class InfiniteStrategy:
                             if "🛡️" not in o['desc']: 
                                 o['desc'] = f"🛡️교정_{o['desc'].replace('🦇', '').replace('🧹', '')}"
                         
-                        # 🎯 [V20.2 핫픽스] 마이너스 호가 방어막 공통 적용 (자전거래 방패 내부에서도)
+                        # 🎯 마이너스 호가 방어막 공통 적용
                         o['price'] = max(0.01, o['price'])
                             
                     res.append(o)
@@ -76,8 +80,6 @@ class InfiniteStrategy:
             
             if not is_reverse and (t_val > (split - 1) or (qty > 0 and is_money_short_check)):
                 if is_jackpot_reached:
-                    # 🚀 [V21.4 로직 3 패치] 대박 익절 모드 전환 (리버스 생략)
-                    # 목표 수익률에 도달했다면 리버스 감옥에 가지 않고 그대로 익절 페이즈로 부드럽게 넘어갑니다.
                     pass
                 else:
                     is_reverse = True 
@@ -127,7 +129,6 @@ class InfiniteStrategy:
         if market_type == "REG":
             if qty == 0:
                 process_status = "✨새출발"
-                # 🎯 [V20.2 핫픽스] 마이너스 호가 하한선 방어
                 buy_price = max(0.01, round(self._ceil(base_price * 1.15) - 0.01, 2))
                 buy_qty = math.floor(one_portion_amt / buy_price) if buy_price > 0 else 0
                 if buy_qty > 0:
@@ -138,9 +139,8 @@ class InfiniteStrategy:
             if is_reverse:
                 sell_divisor = 10 if split <= 20 else 20
                 
-                # 🎯 [V21.4 로직 2 패치] 리버스 최소 4주 매도 보장 & 수량 부족 시 전량 청산
                 if qty < 4:
-                    sell_qty = qty # 4주도 안 남았으면 분할 불가하므로 그냥 잔량 전량 청산
+                    sell_qty = qty 
                 else:
                     sell_qty = max(4, math.floor(qty / sell_divisor)) 
 
@@ -158,14 +158,14 @@ class InfiniteStrategy:
                     buy_qty = 0
                     buy_price = 0
                     if one_portion_amt > 0 and star_price > 0:
-                        # 🎯 [V20.2 핫픽스] 마이너스 호가 하한선 방어
                         buy_price = max(0.01, round(star_price - 0.01, 2))
                         if buy_price > 0: 
                             buy_qty = math.floor(one_portion_amt / buy_price)
                             if buy_qty > 0:
                                 core_orders.append({"side": "BUY", "price": buy_price, "qty": buy_qty, "type": "LOC", "desc": "⚓잔금매수"})
                     
-                    if sell_qty > 0 and star_price > 0:
+                    # 🚨 [V21.10 패치] 스나이퍼 익절 완료 시 쿼터매도(별값매도) 숨김 처리
+                    if not lock_s_sell and sell_qty > 0 and star_price > 0:
                         core_orders.append({"side": "SELL", "price": star_price, "qty": sell_qty, "type": "LOC", "desc": "🌟별값매도"})
 
                     if one_portion_amt > 0 and buy_price > 0:
@@ -173,7 +173,6 @@ class InfiniteStrategy:
                             target_qty = buy_qty + i 
                             raw_jup_price = self._floor(one_portion_amt / target_qty)
                             capped_jup_price = min(raw_jup_price, buy_price - 0.01)
-                            # 🎯 [V20.2 핫픽스] 마이너스 호가 하한선 방어
                             jup_price = max(0.01, round(capped_jup_price, 2))
                             if jup_price > 0:
                                 bonus_orders.append({"side": "BUY", "price": jup_price, "qty": 1, "type": "LOC", "desc": f"🧹리버스줍줍({i})" })
@@ -181,6 +180,13 @@ class InfiniteStrategy:
                 if market_type == "REG":
                     self.cfg.set_reverse_state(ticker, True, rev_day, exit_target)
                         
+                # 리버스 모드 스나이퍼 상태 표출
+                if lock_s_sell: process_status = "🔫리버스(명중)"
+                if lock_s_buy and version == "V17":
+                    core_orders = [o for o in core_orders if o['side'] != 'BUY']
+                    bonus_orders = [o for o in bonus_orders if o['side'] != 'BUY']
+                    process_status = "💥가로채기(명중)"
+
                 core_orders, bonus_orders, smart_core_orders, smart_bonus_orders = apply_wash_trade_shield(core_orders, bonus_orders, smart_core_orders, smart_bonus_orders)        
                 orders = core_orders + bonus_orders
                 return {"orders": orders, "core_orders": core_orders, "bonus_orders": bonus_orders, "smart_core_orders": [], "smart_bonus_orders": [], "t_val": t_val, "one_portion": one_portion_amt, "process_status": process_status, "is_reverse": is_reverse, "star_price": star_price, "star_ratio": star_ratio, "real_cash_used": real_available_cash}
@@ -192,7 +198,6 @@ class InfiniteStrategy:
             elif t_val < (split / 2): process_status = "🌓전반전"
             else: process_status = "🌕후반전"
 
-            # 🎯 [V20.2 핫픽스] T값 비정상 폭주(수동 매수, 시드 오류) 감지 꼬리표
             if t_val > (split * 1.1):
                 process_status = "🚨T값폭주(역산경고)"
 
@@ -205,7 +210,6 @@ class InfiniteStrategy:
                 if is_simulation or real_available_cash >= one_portion_amt:
                     ref_price = min(avg_price, prev_close)
                     raw_turbo = self._ceil(ref_price * 0.95) - 0.01
-                    # 🎯 [V20.2 핫픽스] 마이너스 호가 하한선 방어
                     turbo_price = max(0.01, round(min(raw_turbo, safe_ceiling - 0.01), 2))
                     turbo_qty = math.floor(one_portion_amt / turbo_price) if turbo_price > 0 else 0
                     if turbo_qty > 0:
@@ -213,11 +217,9 @@ class InfiniteStrategy:
 
             standard_buy_qty = 0 
             N = math.floor(one_portion_amt / avg_price) if avg_price > 0 else 0
-            # 🎯 [V20.2 핫픽스] 마이너스 호가 하한선 방어
             p_avg = max(0.01, round(min(self._ceil(avg_price) - 0.01, safe_ceiling - 0.01), 2))
             
             if can_buy:
-                # 🎯 [V20.2 핫픽스] 마이너스 호가 하한선 방어
                 p_star = max(0.01, round(star_price - 0.01, 2))
 
                 if t_val < (split / 2):
@@ -247,25 +249,27 @@ class InfiniteStrategy:
                     for i in range(1, 6):
                         jup_price = self._floor(one_portion_amt / (base_qty_for_jup + i))
                         capped_jup_price = round(min(jup_price, avg_price - 0.01), 2)
-                        # 🎯 [V20.2 핫픽스] 마이너스 호가 하한선 방어
                         if capped_jup_price > 0:
                             safe_jup_price = max(0.01, capped_jup_price)
                             bonus_orders.append({"side": "BUY", "price": safe_jup_price, "qty": 1, "type": "LOC", "desc": f"🧹줍줍({i})"})
 
             # ==========================================================
-            # 🚨 [V21.3 오리지널 룰 복구] 정규장 LOC 매도는 무조건 별값(star_price)
+            # 🚨 [V21.10 패치] 스나이퍼 명중 시 UI 동기화 및 공수 분리 
             # ==========================================================
             if qty > 0:
-                q_qty = math.ceil(qty / 4)
-                rem_qty = qty - q_qty
+                if lock_s_sell:
+                    # 상방 스나이퍼 명중 시 당일 쿼터 매도는 화면에서 숨기고 전량 목표 매도로 묶음
+                    q_qty = 0
+                    rem_qty = qty
+                else:
+                    q_qty = math.ceil(qty / 4)
+                    rem_qty = qty - q_qty
                 
-                # V17이든 V14이든 17:30 정규장 LOC 쿼터매도는 오리지널 무매 원칙을 철저히 준수함
                 if star_price > 0 and q_qty > 0:
                     core_orders.append({"side": "SELL", "price": star_price, "qty": q_qty, "type": "LOC", "desc": "🌟별값매도"})
                 if target_price > 0 and rem_qty > 0:
                     core_orders.append({"side": "SELL", "price": target_price, "qty": rem_qty, "type": "LIMIT", "desc": "🎯목표매도"})
                     
-                # V17 스나이퍼(시크릿) 전용: 쿼터 익절 성공 시 관망 대비용 스마트 방어 매수 장전
                 if version == "V17":
                     if can_buy and p_avg > 0:
                         smart_core_orders.append({"side": "BUY", "price": p_avg, "qty": N, "type": "LOC", "desc": "🦇스마트방어(평단)"})
@@ -275,6 +279,24 @@ class InfiniteStrategy:
                             if c_j_price > 0:
                                 safe_c_j_price = max(0.01, c_j_price)
                                 smart_bonus_orders.append({"side": "BUY", "price": safe_c_j_price, "qty": 1, "type": "LOC", "desc": f"🧹스마트줍줍({i})"})
+
+            # 플랜 B 스위칭 로직 
+            if lock_s_sell:
+                if version == "V17" and not is_reverse and t_val < (split / 2):
+                    # 전반전 상방 명중 시 기존 매수 삭제 후 스마트 매수로 UI 스위칭
+                    core_orders = [o for o in core_orders if o['side'] != 'BUY']
+                    bonus_orders = [o for o in bonus_orders if o['side'] != 'BUY']
+                    core_orders.extend(smart_core_orders)
+                    bonus_orders.extend(smart_bonus_orders)
+                    process_status = "🦇플랜B(방어/관망)"
+                else:
+                    process_status = "🔫스나이퍼(명중)"
+
+            # 하방 스나이퍼(Intercept) 명중 시 UI 스위칭
+            if lock_s_buy and version == "V17":
+                core_orders = [o for o in core_orders if o['side'] != 'BUY']
+                bonus_orders = [o for o in bonus_orders if o['side'] != 'BUY']
+                process_status = "💥가로채기(명중)"
 
             core_orders, bonus_orders, smart_core_orders, smart_bonus_orders = apply_wash_trade_shield(core_orders, bonus_orders, smart_core_orders, smart_bonus_orders)        
             orders = core_orders + bonus_orders
