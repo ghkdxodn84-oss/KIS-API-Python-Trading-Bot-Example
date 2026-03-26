@@ -200,8 +200,7 @@ class InfiniteStrategy:
                             if jup_price > 0:
                                 bonus_orders.append({"side": "BUY", "price": jup_price, "qty": 1, "type": "LOC", "desc": f"🧹리버스줍줍({i})" })
                 
-                if market_type == "REG":
-                    self.cfg.set_reverse_state(ticker, True, rev_day, exit_target)
+                # 💡 [치명적 맹점 제거 완료] 지시서 조회 시마다 일차가 다시 저장되어 멈춰버리던 코드를 영구 삭제했습니다!
                         
                 # 리버스 모드 스나이퍼 상태 표출
                 if lock_s_sell: process_status = "🔫리버스(명중)"

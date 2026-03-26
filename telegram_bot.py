@@ -170,7 +170,7 @@ class TelegramController:
                     today_str = datetime.datetime.now(pytz.timezone('Asia/Seoul')).strftime('%Y-%m-%d')
                     alert_key = f"{t}_{today_str}"
                     if alert_key not in self.panic_alerts:
-                        alert_msg = f"🚨 <b>[긴급] {t} 패닉 갭 하락 감지! ({gap_pct}%)</b>\nV17 스나이퍼가 상한선 족쇄를 풀고 심해(<b>-{dynamic_pct}%</b>) 타점으로 자동 투입되었습니다!"
+                        alert_msg = f"🚨 <b>[긴급] {t} 패닉 갭 하락 감지! ({gap_pct}%)</b>\n폭락 방어막 가동! V17 스나이퍼가 정밀 가중치(10% Cap)를 적용하여 <b>-{dynamic_pct}%</b> 타점으로 자동 투입되었습니다!"
                         await update.message.reply_text(alert_msg, parse_mode='HTML')
                         self.panic_alerts[alert_key] = True
                 
