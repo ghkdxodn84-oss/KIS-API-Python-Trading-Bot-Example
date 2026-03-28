@@ -143,7 +143,6 @@ class TelegramController:
             ticker_data_list = []
             total_buy_needed = 0.0
 
-            # 💡 [수술 패치] main.py의 스나이퍼 루프가 사용하는 전역 캐시(app_data)에 접근하여 추적 상태를 빼옵니다
             tracking_cache = context.job_queue.jobs()[0].data.get('sniper_tracking', {}) if context.job_queue and context.job_queue.jobs() else {}
 
             for t in sorted_tickers:
@@ -159,26 +158,21 @@ class TelegramController:
                 safe_prev_close = prev_close if prev_close else 0.0
                 
                 idx_ticker = "SOXX" if t == "SOXL" else "QQQ"
-                weight = self.cfg.get_sniper_multiplier(t)
                 
-                # 💡 [V22.02 수술] 순수 진폭 상수 반환 (패닉 관련 속성 제거)
-                dynamic_pct = await asyncio.to_thread(self.broker.get_dynamic_sniper_target, idx_ticker, weight)
-                if dynamic_pct is None:
-                    dynamic_pct = 7.59 if t == "SOXL" else 6.18
+                # 💡 [V3.0 패치] 기존 weight 변수 삭제, 자율주행 객체 전체 호출
+                dynamic_pct_obj = await asyncio.to_thread(self.broker.get_dynamic_sniper_target, idx_ticker)
+                dynamic_pct = float(dynamic_pct_obj) if dynamic_pct_obj is not None else (7.59 if t == "SOXL" else 6.18)
                 
-                # 💡 [V22.02 수술] 장중 고점을 기준으로 방어선을 표출하기 위해 실시간 추적 캐시를 확인
                 tracking_status = tracking_cache.get(t, {})
-                current_day_high = tracking_status.get('day_high', day_high) # 캐시가 없으면 기본 day_high 사용
+                current_day_high = tracking_status.get('day_high', day_high) 
                 
-                hybrid_target_price = current_day_high * (1 - (dynamic_pct / 100.0))
+                hybrid_target_price = current_day_high * (1 - (abs(dynamic_pct) / 100.0))
                 
-                # V22.02에 맞게 조건 단순화 (스나이퍼는 무조건 장전 대기 중)
                 is_sniper_active = True
-                trigger_reason = f"-{dynamic_pct}%"
+                trigger_reason = f"-{abs(dynamic_pct)}%"
                 
                 is_already_ordered = self.cfg.check_lock(t, "REG") or self.cfg.check_lock(t, "SNIPER")
                 
-                # 💡 [핵심 수술 완료] 타임 패러독스 방어 백신 투여! 단순 조회 시 무조건 is_simulation=True 강제 고정
                 plan = self.strategy.get_plan(
                     t, curr, actual_avg, actual_qty, safe_prev_close, ma_5day=ma_5day,
                     market_type="REG", available_cash=allocated_cash[t], force_turbo_off=force_turbo_off,
@@ -214,12 +208,12 @@ class TelegramController:
                     'hybrid_base': 0.0, 
                     'hybrid_target': hybrid_target_price,
                     'trigger_reason': trigger_reason,
-                    'sniper_trigger': float(dynamic_pct), 
+                    'sniper_trigger': abs(float(dynamic_pct)), 
                     'secret_quarter_target': secret_quarter_target,
                     'day_high': day_high,
                     'day_low': day_low,
                     'prev_close': safe_prev_close,
-                    'tracking_info': tracking_status # 💡 추적 정보 탑재
+                    'tracking_info': tracking_status 
                 })
                 total_buy_needed += sum(o['price']*o['qty'] for o in plan['orders'] if o['side']=='BUY')
 
@@ -512,20 +506,30 @@ class TelegramController:
         await update.message.reply_text(msg, reply_markup=markup, parse_mode='HTML')
 
     async def cmd_settlement(self, update, context):
+        """
+        [V3.0 패치] 실시간 변동성 지표 수집 후 UI단에 전달
+        """
         if not self._is_admin(update): return
         
         active_tickers = self.cfg.get_active_tickers()
         atr_data = {}
+        dynamic_target_data = {} # 💡 스나이퍼 타격선 전체 객체 보관용
         
-        status_msg = await update.message.reply_text("⏳ <b>실시간 시장 지표(ATR) 연산 중...</b>", parse_mode='HTML')
+        status_msg = await update.message.reply_text("⏳ <b>실시간 시장 지표(HV/VXN) 연산 중...</b>", parse_mode='HTML')
         
         for t in active_tickers:
             if self.cfg.get_version(t) == "V17":
+                # 1. 단기 노이즈(ATR) 데이터 수집
                 atr_data[t] = await asyncio.to_thread(self.broker.get_atr_data, t)
+                # 2. 거시 변동성(V3.0 객체) 수집
+                idx_ticker = "SOXX" if t == "SOXL" else "QQQ"
+                dynamic_target_data[t] = await asyncio.to_thread(self.broker.get_dynamic_sniper_target, idx_ticker)
             else:
                 atr_data[t] = (0.0, 0.0)
+                dynamic_target_data[t] = None
                 
-        msg, markup = self.view.get_settlement_message(active_tickers, self.cfg, atr_data)
+        # 수집한 데이터를 view로 넘겨서 텍스트 완성
+        msg, markup = self.view.get_settlement_message(active_tickers, self.cfg, atr_data, dynamic_target_data)
         await status_msg.edit_text(msg, reply_markup=markup, parse_mode='HTML')
 
     async def cmd_version(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -690,7 +694,7 @@ class TelegramController:
             elif sub == "TARGET": ko_name = "목표 수익률(%)"
             elif sub == "COMPOUND": ko_name = "자동 복리율(%)"
             elif sub == "STOCK_SPLIT": ko_name = "액면 분할/병합 비율 (예: 10분할은 10, 10병합은 0.1)"
-            elif sub == "SNIPER": ko_name = "스나이퍼 타점 가중치 (예: SOXL 기본 1.0, TQQQ 기본 0.9)"
+            # 💡 SNIPER 가중치 입력 분기 삭제 완료!
             else: ko_name = "값"
             
             await context.bot.send_message(update.effective_chat.id, f"⚙️ [{ticker}] {ko_name} 입력 (숫자만):")
@@ -741,12 +745,6 @@ class TelegramController:
                 self.cfg.set_last_split_date(ticker, today_str)
                 
                 await update.message.reply_text(f"✅ [{ticker}] 수동 액면 보정 완료\n▫️ 모든 장부 기록이 {val}배 비율로 정밀하게 소급 조정되었습니다.")
-                
-            elif state.startswith("CONF_SNIPER"):
-                if val <= 0: return await update.message.reply_text("❌ 오류: 가중치는 0보다 커야 합니다.")
-                ticker = parts[2]
-                self.cfg.set_sniper_multiplier(ticker, val)
-                await update.message.reply_text(f"✅ [{ticker}] 스나이퍼 타점 가중치가 {val}배로 변경되었습니다.")
                 
         except ValueError:
             await update.message.reply_text("❌ 오류: 유효한 숫자를 입력하세요. (입력 대기 상태가 강제 해제되었습니다.)")

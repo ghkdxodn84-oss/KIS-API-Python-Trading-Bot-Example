@@ -13,7 +13,8 @@ import yfinance as yf
 import pytz
 import tempfile
 import pandas as pd   
-import numpy as np    
+import numpy as np
+import volatility_engine as ve  # 💡 [V3.0 수술] 동적 변동성 엔진 연결
 
 class KoreaInvestmentBroker:
     def __init__(self, app_key, app_secret, cano, acnt_prdt_cd="01"):
@@ -574,35 +575,55 @@ class KoreaInvestmentBroker:
             print(f"⚠️ [야후 파이낸스] 액면분할 조회 에러: {e}")
         return 0.0, ""
 
-    def get_dynamic_sniper_target(self, index_ticker, weight=1.0):
+    def get_dynamic_sniper_target(self, index_ticker):
         """
-        [V22.02] 순수 절대 상수 (20년치 평균 역사적 진폭) 기반 스나이퍼 타점 산출
-        가변적인 ATR 연산 및 패닉장 갭 필터를 완전히 도려내고, 역사적으로 증명된 고정값만 사용합니다.
+        [V3.0+] 자율주행 동적 스나이퍼 타점 산출 (롤링 1년 평균 분모 역산 동기화)
+        수동 가중치를 폐기하고, volatility_engine을 호출하여 실시간 공포 지수(VXN/HV) 기반 타격선을 반환합니다.
+        (리턴값은 float 형태의 target_drop이며, weight와 지표값도 객체 속성으로 함께 반환합니다.)
         """
         try:
-            # 💡 [핵심 수술] 20년치 백테스트 기반 절대 진폭 상수 (1배수 기준)
-            FIXED_AMP_SOXX = 7.59
-            FIXED_AMP_QQQ = 6.18
-            
-            base_amp = FIXED_AMP_SOXX if index_ticker == "SOXX" else FIXED_AMP_QQQ
-            
-            # 사용자가 설정한 가중치(weight) 적용
-            final_target = base_amp * weight
-            
             class TargetFloat(float):
                 pass
             
-            ret = TargetFloat(round(final_target, 2))
+            if index_ticker == "SOXX":
+                # SOXL (기초지수 SOXX)
+                hv_val, weight, target_drop = ve.get_soxl_target_drop_full()
+                ret = TargetFloat(target_drop)
+                ret.metric_val = hv_val
+                ret.weight = weight
+                ret.base_amp = -7.59
+                ret.metric_name = "SOXX 자체 HV"
+                # 💡 [V3.0+ 수술] 1년 평균(분모) 역산 동기화 주입
+                ret.metric_base = round(hv_val / weight, 2) if weight > 0 else 25.0
+            else:
+                # TQQQ (기초지수 QQQ, 공포지수 VXN)
+                vxn_val, weight, target_drop = ve.get_tqqq_target_drop_full()
+                ret = TargetFloat(target_drop)
+                ret.metric_val = vxn_val
+                ret.weight = weight
+                ret.base_amp = -6.18
+                ret.metric_name = "프리마켓 VXN"
+                # 💡 [V3.0+ 수술] 1년 평균(분모) 역산 동기화 주입
+                ret.metric_base = round(vxn_val / weight, 2) if weight > 0 else 20.0
             
-            # [V22.02] 패닉장 등 불필요한 노이즈 속성 제거 및 기본값 세팅
             ret.is_panic = False
             ret.gap_pct = 0.0 
             
             return ret
             
         except Exception as e:
-            print(f"⚠️ [Broker] 절대 상수 스나이퍼 타점 반환 실패 ({index_ticker}): {e}")
-            return None
+            print(f"⚠️ [Broker] V3.0 스나이퍼 타점 반환 실패 ({index_ticker}): {e}")
+            # 통신 실패 시 방어용 기본 상수 반환
+            fallback_val = -7.59 if index_ticker == "SOXX" else -6.18
+            ret = TargetFloat(fallback_val)
+            ret.metric_val = 0.0
+            ret.weight = 1.0
+            ret.base_amp = fallback_val
+            ret.metric_name = "통신오류(기본값)"
+            ret.metric_base = 25.0 if index_ticker == "SOXX" else 20.0
+            ret.is_panic = False
+            ret.gap_pct = 0.0
+            return ret
 
     def get_day_high_low(self, ticker):
         try:
@@ -632,17 +653,14 @@ class KoreaInvestmentBroker:
     def get_atr_data(self, ticker):
         """
         [V22.02] 실시간 ATR5 및 ATR14 (변동성 지표) 연산 모듈
-        야후 파이낸스의 과거 일봉 데이터를 기반으로 최근 5일, 14일간의 평균 변동폭(%)을 산출합니다.
         """
         try:
             stock = yf.Ticker(ticker)
-            # 14일 ATR을 구하기 위해 최소 15일 이상의 데이터 필요 (여유있게 30일치 확보)
             hist = stock.history(period="30d")
             
             if hist.empty or len(hist) < 15:
                 return 0.0, 0.0
                 
-            # True Range (TR) 계산: max(당일고가-당일저가, abs(당일고가-전일종가), abs(당일저가-전일종가))
             hist['Prev_Close'] = hist['Close'].shift(1)
             hist['TR'] = hist.apply(lambda row: max(
                 row['High'] - row['Low'],
@@ -650,7 +668,6 @@ class KoreaInvestmentBroker:
                 abs(row['Low'] - row['Prev_Close']) if not pd.isna(row['Prev_Close']) else 0
             ), axis=1)
             
-            # 단순 이동 평균(SMA) 방식으로 5일 및 14일 평균 TR 산출
             hist['ATR5'] = hist['TR'].rolling(window=5).mean()
             hist['ATR14'] = hist['TR'].rolling(window=14).mean()
             
@@ -658,7 +675,6 @@ class KoreaInvestmentBroker:
             last_close = float(last_row['Close'])
             
             if last_close > 0:
-                # 퀀트 표준에 맞춰 현재가 대비 백분율(%)로 변환
                 atr5_pct = (float(last_row['ATR5']) / last_close) * 100
                 atr14_pct = (float(last_row['ATR14']) / last_close) * 100
                 return round(atr5_pct, 1), round(atr14_pct, 1)

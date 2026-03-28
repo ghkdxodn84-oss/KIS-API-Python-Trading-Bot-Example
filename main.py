@@ -230,56 +230,13 @@ async def scheduled_force_reset(context):
             else:
                 cfg.increment_reverse_day(t)
                 
-        final_msg = f"🔓 <b>[{target_hour}:00] 시스템 초기화 완료 (매매 잠금 해제 & 스나이퍼 장전)</b>" + msg_addons
+        final_msg = f"🔓 <b>[{target_hour}:00] 시스템 초기화 완료 (매매 잠금 해제 & 변동성 락온)</b>" + msg_addons
         await context.bot.send_message(chat_id=chat_id, text=final_msg, parse_mode='HTML')
         
     except Exception as e:
         await context.bot.send_message(chat_id=context.job.chat_id, text=f"🚨 <b>시스템 초기화 중 에러 발생:</b> {e}", parse_mode='HTML')
 
-async def scheduled_premarket_monitor(context):
-    if not is_market_open(): return
-    app_data = context.job.data
-    
-    kst = pytz.timezone('Asia/Seoul')
-    now = datetime.datetime.now(kst)
-    target_hour, _ = get_target_hour()
-    
-    if not (now.hour == target_hour and 0 <= now.minute < 30):
-        return
-
-    cfg, broker, strategy, tx_lock = app_data['cfg'], app_data['broker'], app_data['strategy'], app_data['tx_lock']
-
-    async def _do_premarket():
-        async with tx_lock:
-            _, holdings = broker.get_account_balance()
-            if holdings is None: return 
-
-            for t in cfg.get_active_tickers():
-                h = holdings.get(t, {'qty': 0, 'avg': 0})
-                if int(h['qty']) == 0: continue 
-
-                curr_p = await asyncio.to_thread(broker.get_current_price, t)
-                prev_c = await asyncio.to_thread(broker.get_previous_close, t)
-                
-                plan = strategy.get_plan(t, curr_p, float(h['avg']), int(h['qty']), prev_c, market_type="PRE_CHECK")
-                
-                if plan['orders']:
-                    msg = f"🌅 <b>[{t}] 대박! 프리마켓 목표 달성 🎉</b>\n⚡ 전량 익절 주문을 실행합니다!"
-                    broker.cancel_all_orders_safe(t)
-                    for o in plan['orders']:
-                        res = broker.send_order(t, o['side'], o['qty'], o['price'], o['type'])
-                        err_msg = res.get('msg1')
-                        is_success = res.get('rt_cd') == '0'
-                        msg += f"\n└ {o['desc']}: {'✅' if is_success else f'❌({err_msg})'}"
-                        await asyncio.sleep(0.2) 
-                    await context.bot.send_message(chat_id=context.job.chat_id, text=msg, parse_mode='HTML')
-
-    try:
-        await asyncio.wait_for(_do_premarket(), timeout=45.0)
-    except asyncio.TimeoutError:
-        logging.warning("⚠️ 프리마켓 감시 중 통신 지연으로 1회 건너뜀 (Deadlock 방어)")
-    except Exception as e:
-        logging.error(f"🚨 프리마켓 모니터 에러: {e}")
+# 💡 [V22.03 패치] 불필요한 프리마켓 익절 모니터링 모듈(scheduled_premarket_monitor) 소각 완료
 
 async def scheduled_sniper_monitor(context):
     if not is_market_open(): return
@@ -358,11 +315,10 @@ async def scheduled_sniper_monitor(context):
                 current_weight = cfg.get_sniper_multiplier(t)
                 cached_data = target_cache.get(t)
                 
-                # 💡 [V22.02] 순수 절대 상수 기반 진폭 산출
                 if cached_data is None or cached_data.get('weight') != current_weight:
-                    tgt = await asyncio.to_thread(broker.get_dynamic_sniper_target, idx_ticker, current_weight)
+                    tgt = await asyncio.to_thread(broker.get_dynamic_sniper_target, idx_ticker) # 💡 V3.0 파라미터 수정 (weight 삭제)
                     if tgt is not None:
-                        target_cache[t] = {'value': tgt, 'weight': current_weight}
+                        target_cache[t] = {'value': float(tgt), 'weight': current_weight}
                     else:
                         target_cache[t] = {'value': (7.59 if t=="SOXL" else 6.18), 'weight': current_weight}
 
@@ -371,7 +327,7 @@ async def scheduled_sniper_monitor(context):
                 tracking_info = tracking_cache.setdefault(t, {'is_tracking': False, 'lowest_price': float('inf'), 'day_high': 0.0, 'armed_price': 0.0, 'alerted': False})
                 
                 # =========================================================================
-                # 1. V22.02 장중 시계열 고점 기반 추적 및 능동형 스나이퍼 매수
+                # 1. 장중 시계열 고점 기반 추적 및 능동형 스나이퍼 매수
                 # =========================================================================
                 if not lock_buy:
                     candle = await asyncio.to_thread(broker.get_current_5min_candle, t)
@@ -380,28 +336,24 @@ async def scheduled_sniper_monitor(context):
                         c_open, c_high, c_low, c_close = candle['open'], candle['high'], candle['low'], candle['close']
                         c_vol, c_vol_ma20 = candle['volume'], candle['vol_ma20']
                         
-                        # 💡 [시계열 1단계] 당일 장중 최고가 갱신
                         if c_high > tracking_info['day_high']:
                             tracking_info['day_high'] = c_high
                             
-                        # 💡 [시계열 2단계] 고점 대비 에너지 소진 측정 (Drop Pct)
                         current_drop = (tracking_info['day_high'] - c_low) / tracking_info['day_high'] if tracking_info['day_high'] > 0 else 0
                         
-                        # 💡 [시계열 3단계] 절대 진폭 돌파 시 안전장치 해제(Armed) 및 방어선(Armed Price) 고정
-                        if not tracking_info['is_tracking'] and current_drop >= (sniper_pct / 100.0):
+                        if not tracking_info['is_tracking'] and current_drop >= (abs(sniper_pct) / 100.0): # 💡 음수 대비 abs 처리
                             tracking_info['is_tracking'] = True
-                            tracking_info['armed_price'] = tracking_info['day_high'] * (1 - (sniper_pct / 100.0))
+                            tracking_info['armed_price'] = tracking_info['day_high'] * (1 - (abs(sniper_pct) / 100.0))
                             tracking_info['lowest_price'] = c_low
                             
                             if not tracking_info['alerted']:
                                 msg = f"🎯 <b>[{t}] 스나이퍼 안전장치 해제 (Armed)!</b>\n"
                                 msg += f"📈 <b>장중 고점: ${tracking_info['day_high']:.2f}</b>\n"
-                                msg += f"📉 <b>에너지 소진: -{sniper_pct:.2f}% (방어선 ${tracking_info['armed_price']:.2f} 돌파)</b>\n"
+                                msg += f"📉 <b>에너지 소진: -{abs(sniper_pct):.2f}% (방어선 ${tracking_info['armed_price']:.2f} 돌파)</b>\n"
                                 msg += f"👀 진짜 바닥을 다질 때까지 발목을 노리며 추적을 시작합니다."
                                 await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
                                 tracking_info['alerted'] = True
                                 
-                        # 💡 [시계열 4단계] 심해 추적 및 3대 찐바닥 조건 격발
                         if tracking_info['is_tracking']:
                             if c_low < tracking_info['lowest_price']:
                                 tracking_info['lowest_price'] = c_low
@@ -415,21 +367,16 @@ async def scheduled_sniper_monitor(context):
                             if is_yangbong and is_rebounded and is_volume_spike:
                                 if cfg.get_secret_mode():
                                     
-                                    # 💡 [V22.02] 리버스 고정 예산 로직은 strategy.py에서 산출된 값을 가져옴
-                                    # 스나이퍼 모니터에서는 strategy.py의 get_plan을 1회 호출하여 안전하게 1회분(one_portion) 예산을 획득
                                     ma_5day = await asyncio.to_thread(broker.get_5day_ma, t)
                                     temp_plan = strategy.get_plan(t, curr_p, avg_price, qty, prev_c, ma_5day=ma_5day, market_type="REG", available_cash=allocated_cash[t], force_turbo_off=force_turbo_off, is_simulation=True)
                                     sniper_budget = temp_plan.get('one_portion', 0.0)
                                     
-                                    # 💡 [V22.02] 절대 상한선 캡(Cap) 적용! 장전 가격(armed_price)을 절대 초과할 수 없음
                                     exec_price = min(c_close, tracking_info['armed_price'])
                                     
                                     if sniper_budget >= exec_price and exec_price > 0:
                                         await asyncio.to_thread(broker.cancel_targeted_orders, t, "BUY", "34")
                                         await asyncio.sleep(1.0)
                                         
-                                        # 💡 [V22.02] 0.5회분 방어 룰 적용 (현재가가 평단가보다 비싸면 0.5회분만)
-                                        # 리버스 모드일 경우 평단가는 무의미하므로 1회분 전체 타격 (리버스=물려있는 상태)
                                         is_rev = temp_plan.get('is_reverse', False)
                                         if not is_rev and exec_price > avg_price:
                                             sniper_budget = sniper_budget * 0.5
@@ -446,7 +393,6 @@ async def scheduled_sniper_monitor(context):
                                             ask_price = await asyncio.to_thread(broker.get_ask_price, t)
                                             safe_ask_price = ask_price if ask_price > 0 else c_close
                                             
-                                            # 다시 한 번 상한선 캡을 철저히 씌워 지정가 주문 발송
                                             final_exec_price = min(safe_ask_price, tracking_info['armed_price'])
                                             
                                             res = broker.send_order(t, "BUY", rem_qty, final_exec_price, "LIMIT")
@@ -500,7 +446,6 @@ async def scheduled_sniper_monitor(context):
                                             await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
                                             fail_history[t] = now_ts
                                         
-                                        # 10분 쿨타임 복구용 방어 주문 재전송
                                         for o in temp_plan.get('core_orders', []) + temp_plan.get('bonus_orders', []):
                                             if o['side'] == 'BUY':
                                                 broker.send_order(t, o['side'], o['qty'], o['price'], o['type'])
@@ -723,7 +668,8 @@ async def scheduled_regular_trade(context):
     chat_id = context.job.chat_id
     
     now_minutes = now.hour * 60 + now.minute
-    target_minutes = target_hour * 60 + 30
+    # 💡 [V22.03 패치] 30분 실행 대기에서 05분으로 변경
+    target_minutes = target_hour * 60 + 5
     
     if abs(now_minutes - target_minutes) > 2 and abs(now_minutes - target_minutes) < (24*60 - 2):
         return
@@ -739,10 +685,12 @@ async def scheduled_regular_trade(context):
 
     jitter_seconds = random.randint(0, 180)
 
+    # 💡 [V22.03 패치] 안내 메시지도 05분으로 표기 변경
     await context.bot.send_message(
         chat_id=chat_id, 
-        text=f"🌃 <b>[{target_hour}:30] 다이내믹 스노우볼 {latest_version} 정규장 주문 준비!</b>\n"
-             f"🛡️ 서버 접속 부하(동시접속) 방지를 위해 <b>{jitter_seconds}초</b> 대기 후 안전하게 주문 전송을 시작합니다.", 
+        text=f"🌃 <b>[{target_hour}:05] 앱솔루트 퀀트 시스템 {latest_version} 통합 주문 장전!</b>\n"
+             f"🛡️ <b>[V3.0 패치] 프리마켓 감시 생략. 즉각 스나이퍼 & 방어 매수를 동시 장전합니다.</b>\n"
+             f"서버 접속 부하(동시접속) 방지를 위해 <b>{jitter_seconds}초</b> 대기 후 안전하게 주문 전송을 시작합니다.", 
         parse_mode='HTML'
     )
 
@@ -832,7 +780,7 @@ async def scheduled_regular_trade(context):
                 await context.bot.send_message(chat_id=chat_id, text=f"⚠️ <b>[API 통신 지연 감지 - {attempt}/{MAX_RETRIES}회]</b>\n한투 서버 불안정으로 계좌 조회 실패. 1분 뒤 끈질기게 다시 진입합니다! 🛡️", parse_mode='HTML')
             await asyncio.sleep(RETRY_DELAY)
 
-    await context.bot.send_message(chat_id=chat_id, text="🚨 <b>[긴급 에러] 최대 15회(15분) 재시도에도 불구하고 KIS API 통신 복구에 실패하여, 금일 정규장 주문을 최종 취소합니다. 수동 점검이 아필요합니다!</b>", parse_mode='HTML')
+    await context.bot.send_message(chat_id=chat_id, text="🚨 <b>[긴급 에러] 최대 15회(15분) 재시도에도 불구하고 KIS API 통신 복구에 실패하여, 금일 정규장 주문을 최종 취소합니다. 수동 점검이 필요합니다!</b>", parse_mode='HTML')
 
 async def scheduled_auto_sync_summer(context):
     if not is_dst_active(): return 
@@ -867,7 +815,7 @@ def main():
     latest_version = cfg.get_latest_version() 
     
     print("=" * 50)
-    print(f"🚀 방치형 자동매매 {latest_version} (V22.02 아키텍처 탑재)")
+    print(f"🚀 앱솔루트 스노우볼 퀀트 엔진 {latest_version} (V22.03 아키텍처 탑재)")
     print(f"📅 날짜 정보: {season_msg}")
     print(f"⏰ 자동 동기화: 08:30(여름) / 09:30(겨울) 자동 변경")
     print("=" * 50)
@@ -911,11 +859,15 @@ def main():
         jq.run_daily(scheduled_auto_sync_summer, time=datetime.time(8, 30, tzinfo=kst), days=tuple(range(7)), chat_id=cfg.get_chat_id(), data=app_data)
         jq.run_daily(scheduled_auto_sync_winter, time=datetime.time(9, 30, tzinfo=kst), days=tuple(range(7)), chat_id=cfg.get_chat_id(), data=app_data)
         
+        # 💡 [V22.03 패치] 17:00 / 18:00 Lock 초기화 스케줄
         for hour in [17, 18]:
             jq.run_daily(scheduled_force_reset, time=datetime.time(hour, 0, tzinfo=kst), days=(0,1,2,3,4), chat_id=cfg.get_chat_id(), data=app_data)
-            jq.run_daily(scheduled_regular_trade, time=datetime.time(hour, 30, tzinfo=kst), days=(0,1,2,3,4), chat_id=cfg.get_chat_id(), data=app_data)
+            # 💡 [V22.03 패치] 30분 -> 05분으로 당겨서 스나이퍼 & 방어 주문 통합 전송
+            jq.run_daily(scheduled_regular_trade, time=datetime.time(hour, 5, tzinfo=kst), days=(0,1,2,3,4), chat_id=cfg.get_chat_id(), data=app_data)
 
-        jq.run_repeating(scheduled_premarket_monitor, interval=60, chat_id=cfg.get_chat_id(), data=app_data)
+        # 💡 [V22.03 패치] 불필요한 프리마켓 익절 모니터링 삭제 (주석 처리됨)
+        # jq.run_repeating(scheduled_premarket_monitor, interval=60, chat_id=cfg.get_chat_id(), data=app_data)
+        
         jq.run_repeating(scheduled_sniper_monitor, interval=60, chat_id=cfg.get_chat_id(), data=app_data)
         
         jq.run_daily(scheduled_self_cleaning, time=datetime.time(6, 0, tzinfo=kst), days=tuple(range(7)), chat_id=cfg.get_chat_id(), data=app_data)
