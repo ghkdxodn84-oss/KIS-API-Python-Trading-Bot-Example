@@ -18,6 +18,7 @@ class TelegramView:
         season_short = "🌞서머타임 ON" if "Summer" in season_icon else "❄️서머타임 OFF"
         sync_time = "08:30" if target_hour == 17 else "09:30"
 
+        # 💡 메인 화면은 오리지널 상태를 100% 유지합니다 (수정 없음)
         return (
             f"🌌 <b>[ 인피니트 스노우볼 {latest_version} ]</b>\n" 
             f"⚡ <b>동적 시계열 스나이퍼 & 무결성 엔진</b> \n\n"
@@ -204,7 +205,6 @@ class TelegramView:
             icon = "🔺" if t_info['profit_amt'] >= 0 else "🔻"
             body_msg += f"{icon} 수익: {sign}{abs(t_info['profit_pct']):.2f}% ({sign}${abs(t_info['profit_amt']):,.2f})\n"
             
-            # 💡 [V22.10 패치] 1줄 압축 표출 완벽 복구 및 리버스 모드 스나이퍼 대기열 노출
             sniper_status_txt = t_info.get('upward_sniper', 'OFF')
             
             if is_rev:
@@ -218,9 +218,10 @@ class TelegramView:
                 else:
                     body_msg += f"⚙️ 🎯 {t_info['target']}% | ⭐ {t_info['star_pct']}% | 🎯감시: {sniper_status_txt}\n"
                 
-            # 리버스 모드 포함하여 스나이퍼 대기선 표출 (V17 제외)
             if sniper_status_txt == "ON" and v_mode != "V17":
-                if tracking_info.get('is_trailing', False):
+                if not is_trade_active:
+                    body_msg += f"🎯 상방 스나이퍼: 감시 종료 (장마감)\n"
+                elif tracking_info.get('is_trailing', False):
                     peak_price = tracking_info.get('peak_price', 0.0)
                     trigger_price = tracking_info.get('trigger_price', 0.0)
                     body_msg += f"🎯 상방 추적(${trigger_price:.2f}) 중 (고가: ${peak_price:.2f})\n"
@@ -238,45 +239,55 @@ class TelegramView:
             sniper_pct = t_info.get('sniper_trigger', 0.0) 
             secret_quarter_target = t_info.get('secret_quarter_target', 0.0)
             
+            # 💡 [V22.16 패치] 통합 지시서는 시장 가중치(Weight)에 따라 단 1줄의 스나이퍼 상태만 표출 (공수 분리)
             if v_mode == "V17":
-                if "가로채기" in proc_status:
-                    hit_price = tracking_info.get('hit_price', 0.0)
-                    lowest = tracking_info.get('lowest_price', 0.0)
-                    
-                    if hit_price == 0.0:
-                        cache_file = f"data/sniper_cache_{t}.json"
-                        if os.path.exists(cache_file):
-                            try:
-                                with open(cache_file, 'r') as f:
-                                    c_data = json.load(f)
-                                    hit_price = c_data.get('hit_price', 0.0)
-                                    lowest = c_data.get('lowest_price', 0.0)
-                            except: pass
-                    
-                    if hit_price > 0 and lowest > 0:
-                        bounce_pct = ((hit_price - lowest) / lowest) * 100
-                        body_msg += f"💥 <b>명중: ${hit_price:.2f} (${lowest:.2f} 대비 +{bounce_pct:.2f}%)</b>\n"
-                    else:
-                        body_msg += f"💥 <b>스나이퍼: 명중 완료</b>\n"
-                        
-                elif tracking_info.get('is_trailing', False):
-                    peak_price = tracking_info.get('peak_price', 0.0)
-                    trigger_price = tracking_info.get('trigger_price', 0.0)
-                    body_msg += f"🎯 <b>쿼터 추적(${trigger_price:.2f}) 중 (고가: ${peak_price:.2f})</b>\n"
-                    
-                elif tracking_info.get('is_tracking', False):
-                    lowest = tracking_info.get('lowest_price', 0.0)
-                    trigger_val = 1.5 if t == "SOXL" else 1.0
-                    body_msg += f"🎯 <b>장전선 이탈! 장중 바닥 추적 중</b>\n  <b>(최저: ${lowest:.2f} / 목표반등: +{trigger_val}%)</b>\n"
-                    
-                elif hybrid_target > 0:
-                    body_msg += f"📉 <b>스나이퍼: {sniper_pct:.2f}% 진폭(TR) 대기</b>\n"
-                    
-                else:
-                    body_msg += f"📉 <b>스나이퍼: 장전 대기 중</b>\n"
+                dyn_obj = t_info.get('dynamic_obj')
+                weight = dyn_obj.weight if dyn_obj and hasattr(dyn_obj, 'weight') else 1.0
                 
-                if secret_quarter_target > 0 and not tracking_info.get('is_trailing', False):
-                    body_msg += f"🦇 <b>쿼터 스나이퍼: ${secret_quarter_target:.2f} 이상 대기</b>\n"
+                if not is_trade_active:
+                    if weight <= 1.0:
+                        body_msg += f"📉 <b>스나이퍼: 금일 감시 종료 (장마감)</b>\n"
+                    else:
+                        body_msg += f"🦇 <b>쿼터 스나이퍼: 금일 감시 종료 (장마감)</b>\n"
+                else:
+                    if "가로채기" in proc_status:
+                        hit_price = tracking_info.get('hit_price', 0.0)
+                        lowest = tracking_info.get('lowest_price', 0.0)
+                        if hit_price == 0.0:
+                            cache_file = f"data/sniper_cache_{t}.json"
+                            if os.path.exists(cache_file):
+                                try:
+                                    with open(cache_file, 'r') as f:
+                                        c_data = json.load(f)
+                                        hit_price = c_data.get('hit_price', 0.0)
+                                        lowest = c_data.get('lowest_price', 0.0)
+                                except: pass
+                        if hit_price > 0 and lowest > 0:
+                            bounce_pct = ((hit_price - lowest) / lowest) * 100
+                            body_msg += f"💥 <b>명중: ${hit_price:.2f} (${lowest:.2f} 대비 +{bounce_pct:.2f}%)</b>\n"
+                        else:
+                            body_msg += f"💥 <b>스나이퍼: 명중 완료</b>\n"
+                    else:
+                        if weight <= 1.0:
+                            # 🟢 하방 스나이퍼 전용 렌더링 블록 (상방 렌더링 소각)
+                            if tracking_info.get('is_tracking', False):
+                                lowest = tracking_info.get('lowest_price', 0.0)
+                                trigger_val = 1.5 if t == "SOXL" else 1.0
+                                body_msg += f"🎯 <b>장전선 이탈! 장중 바닥 추적 중</b>\n  <b>(최저: ${lowest:.2f} / 목표반등: +{trigger_val}%)</b>\n"
+                            elif hybrid_target > 0:
+                                body_msg += f"📉 <b>스나이퍼: {sniper_pct:.2f}% 진폭(TR) 대기</b>\n"
+                            else:
+                                body_msg += f"📉 <b>스나이퍼: 장전 대기 중</b>\n"
+                        else:
+                            # 🚨 상방 스나이퍼 전용 렌더링 블록 (하방 렌더링 소각)
+                            if tracking_info.get('is_trailing', False):
+                                peak_price = tracking_info.get('peak_price', 0.0)
+                                trigger_price = tracking_info.get('trigger_price', 0.0)
+                                body_msg += f"🎯 <b>쿼터 추적(${trigger_price:.2f}) 중 (고가: ${peak_price:.2f})</b>\n"
+                            elif secret_quarter_target > 0:
+                                body_msg += f"🦇 <b>쿼터 스나이퍼: ${secret_quarter_target:.2f} 이상 대기</b>\n"
+                            else:
+                                body_msg += f"🦇 <b>쿼터 스나이퍼: 장전 대기 중</b>\n"
 
             body_msg += f"📋 <b>[주문 계획 - {proc_status}]</b>\n"
             
@@ -309,26 +320,6 @@ class TelegramView:
                     else: keyboard.append([InlineKeyboardButton(f"🚀 {t} 주문 실행", callback_data=f"EXEC:{t}")])
             else:
                 body_msg += f" 💤 주문 없음 (관망/예산소진)\n"
-            
-            if v_mode != "V17":
-                dyn_obj = t_info.get('dynamic_obj')
-                if dyn_obj is not None and hasattr(dyn_obj, 'metric_val'):
-                    m_val = dyn_obj.metric_val
-                    m_base = float(dyn_obj.metric_base)
-                    weight = dyn_obj.weight
-                    target_drop = abs(float(dyn_obj))
-                    base_amp = abs(dyn_obj.base_amp) if hasattr(dyn_obj, 'base_amp') else (8.79 if t == "SOXL" else 4.95)
-                else:
-                    m_val = 0.0
-                    m_base = 0.0
-                    weight = 0.0
-                    target_drop = t_info.get('sniper_trigger', 0.0)
-                    base_amp = 8.79 if t == "SOXL" else 4.95
-
-                body_msg += f"\n📡 <b>[ 스나이퍼 엔진 레이더 (관측 모드) ]</b>\n"
-                body_msg += f"▫️ <b>시장 진단</b> : 현재 변동성({m_val:.2f})이 1년 평균({m_base:.2f}) 대비 {weight:.2f}배 높습니다.\n"
-                body_msg += f"▫️ <b>동적 타격선</b> : 1년 ATR 앵커({base_amp:.2f}%)에 가중치를 적용, 당일 고점 대비 <b>-{target_drop:.2f}%</b> 하락 시 폭락으로 규정합니다.\n"
-                body_msg += f"▫️ <b>바닥 조건</b> : 타격선(-{target_drop:.2f}%) 이탈 후 세력의 거래량과 양봉 반등이 확인되는 시점을 시스템 상 최적의 진입 타점으로 계산합니다.\n"
             
             body_msg += "\n"
 
@@ -367,6 +358,7 @@ class TelegramView:
                 atr5, atr14 = atr_data.get(t, (0.0, 0.0))
                 target_obj = dynamic_target_data.get(t)
                 
+                # 💡 [V22.16 패치] 가중치에 따른 자율제어 상태 1줄 추가 (괄호 없는 1줄 압축 포맷)
                 if target_obj is not None and hasattr(target_obj, 'metric_val'):
                     m_val = target_obj.metric_val
                     m_name = target_obj.metric_name
@@ -378,13 +370,19 @@ class TelegramView:
                     msg += f"📊 <b>실시간 동적 변동성 (V3.1 스나이퍼):</b>\n"
                     msg += f"▫️ ATR5 ({atr5:.1f}%) / ATR14 ({atr14:.1f}%)\n"
                     msg += f"▫️ {m_name}: {m_val:.2f} / {m_base:.2f}\n"
-                    msg += f"▫️ 타격선: {base_amp:.2f}% x {weight:.2f}배 (-{final_amp:.2f}%)\n\n"
+                    msg += f"▫️ 타격선: {base_amp:.2f}% x {weight:.2f}배 (-{final_amp:.2f}%)\n"
+                    
+                    if weight <= 1.0:
+                        msg += f"▫️ 자율제어: 🔫하방[ON] / 🛡️상방[OFF]\n\n"
+                    else:
+                        msg += f"▫️ 자율제어: 🔫하방[OFF] / 🛡️상방[ON]\n\n"
                 else:
                     base_amp = 8.79 if t == "SOXL" else 4.95
                     msg += f"📊 <b>실시간 동적 변동성 (V3.1 스나이퍼):</b>\n"
                     msg += f"▫️ ATR5 ({atr5:.1f}%) / ATR14 ({atr14:.1f}%)\n"
                     msg += f"▫️ 지표 연산 실패 (기본값 방어 가동 중)\n"
-                    msg += f"▫️ 타격선: {base_amp:.2f}% x 1.00배 (-{base_amp:.2f}%)\n\n"
+                    msg += f"▫️ 타격선: {base_amp:.2f}% x 1.00배 (-{base_amp:.2f}%)\n"
+                    msg += f"▫️ 자율제어: 🔫하방[ON] / 🛡️상방[OFF]\n\n"
             else:
                 msg += "\n"
                 

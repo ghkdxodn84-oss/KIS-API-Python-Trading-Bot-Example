@@ -208,17 +208,27 @@ class KoreaInvestmentBroker:
 
     def get_current_5min_candle(self, ticker):
         """
-        현재 시점 기준으로 진행 중인 가장 최근 5분 단위의 OHLC 캔들과 거래량 데이터를 반환합니다.
-        (MA20 휩소 필터링을 위해 period를 2d로 확장하고 Volume 합산 도출)
+        [V22.15] 이중 거래량(MA10/MA20) 골든크로스 엔진을 위해 순수 정규장 데이터만으로 거래량 평균 산출
         """
         try:
             stock = yf.Ticker(ticker)
-            df = stock.history(period="2d", interval="1m", prepost=True)
+            df = stock.history(period="5d", interval="1m", prepost=True)
             
             if df.empty:
                 return None
                 
-            resampled = df.resample('5min', label='left', closed='left').agg({
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.droplevel(1)
+                
+            df.index = df.index.tz_convert('America/New_York')
+            
+            # 💡 [핵심 수술] 휩소 방어를 위해 거래량 평균(MA) 계산 시 프리/애프터마켓 노이즈를 완벽히 도려냄
+            regular_market = df.between_time('09:30', '15:59')
+            
+            if regular_market.empty:
+                return None
+                
+            resampled = regular_market.resample('5min', label='left', closed='left').agg({
                 'Open': 'first',
                 'High': 'max',
                 'Low': 'min',
@@ -229,18 +239,24 @@ class KoreaInvestmentBroker:
             if resampled.empty:
                 return None
                 
-            resampled['Vol_MA20'] = resampled['Volume'].rolling(20).mean()
+            resampled['Vol_MA10'] = resampled['Volume'].rolling(10, min_periods=1).mean()
+            resampled['Vol_MA20'] = resampled['Volume'].rolling(20, min_periods=1).mean()
             
             last_candle = resampled.iloc[-1]
             
+            vol_ma10 = float(last_candle['Vol_MA10']) if not pd.isna(last_candle['Vol_MA10']) else float(last_candle['Volume'])
             vol_ma20 = float(last_candle['Vol_MA20']) if not pd.isna(last_candle['Vol_MA20']) else float(last_candle['Volume'])
+            
+            # 💡 종가, 고가 등은 프리마켓을 포함한 전체 데이터(df)의 가장 마지막 1분봉 기준으로 최신화
+            latest_1m = df.iloc[-1]
             
             return {
                 'open': float(last_candle['Open']),
-                'high': float(last_candle['High']),
-                'low': float(last_candle['Low']),
-                'close': float(last_candle['Close']),
-                'volume': float(last_candle['Volume']),
+                'high': float(latest_1m['High']),  # 실시간 타격선 갱신을 위해 최신 고가 사용
+                'low': float(latest_1m['Low']),    # 실시간 바닥 갱신을 위해 최신 저가 사용
+                'close': float(latest_1m['Close']),
+                'volume': float(last_candle['Volume']), # 현재 진행 중인 5분 캔들의 누적 거래량
+                'vol_ma10': vol_ma10,
                 'vol_ma20': vol_ma20
             }
         except Exception as e:

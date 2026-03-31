@@ -1,6 +1,6 @@
 # ==========================================================
 # [volatility_engine.py]
-# ⚠️ V3.1 패치: 기초지수 1년 ATR 동적 앵커 및 이중 가중치 엔진 탑재
+# ⚠️ V3.2 패치: 기초지수 1년 ATR 절대 진폭 고정 및 공포지수 방향타 스위치 엔진 탑재
 # ==========================================================
 import yfinance as yf
 import pandas as pd
@@ -118,11 +118,11 @@ def get_tqqq_target_drop():
         
         weight = current_vxn / mean_vxn
         
-        # 💡 [V3.1 패치] 1배수 기초지수 QQQ의 1년 ATR * 3배 동적 스케일링
+        # 💡 [V3.2 패치] 1배수 기초지수 QQQ의 1년 ATR * 3배 동적 스케일링 (가중치 배제 절대 진폭 고정)
         qqq_1y_atr = _calculate_1y_atr("QQQ", "QQQ_ATR_1Y", 1.65)
-        base_amp = -(qqq_1y_atr * 3)
+        base_amp = round(-(qqq_1y_atr * 3), 2)
         
-        target_drop = round(base_amp * weight, 2)
+        target_drop = base_amp
         return target_drop
         
     except Exception as e:
@@ -162,11 +162,12 @@ def get_soxl_target_drop():
         
         weight = latest_hv / mean_hv
         
-        # 💡 [V3.1 패치] 1배수 기초지수 SOXX의 1년 ATR * 3배 동적 스케일링
+        # 💡 [V3.2 패치] 1배수 기초지수 SOXX의 1년 ATR * 3배 동적 스케일링 (가중치 배제 절대 진폭 고정)
         soxx_1y_atr = _calculate_1y_atr("SOXX", "SOXX_ATR_1Y", 2.93)
-        base_amp = -(soxx_1y_atr * 3)
+        base_amp = round(-(soxx_1y_atr * 3), 2)
         
-        return round(base_amp * weight, 2)
+        target_drop = base_amp
+        return target_drop
         
     except Exception as e:
         print(f"❌ SOXX HV 연산 오류: {e}")
@@ -204,9 +205,10 @@ def get_tqqq_target_drop_full():
             
         weight = current_vxn / mean_vxn
         
+        # 💡 [V3.2 패치] 절대 진폭(base_amp)을 target_drop과 1:1로 일치시켜 마스터 스위치 로직과 분리
         qqq_1y_atr = _calculate_1y_atr("QQQ", "QQQ_ATR_1Y", 1.65)
         base_amp = round(-(qqq_1y_atr * 3), 2)
-        target_drop = round(base_amp * weight, 2)
+        target_drop = base_amp
         
         return current_vxn, weight, target_drop, base_amp
         
@@ -250,9 +252,10 @@ def get_soxl_target_drop_full():
         
         weight = latest_hv / mean_hv
         
+        # 💡 [V3.2 패치] 절대 진폭(base_amp)을 target_drop과 1:1로 일치시켜 마스터 스위치 로직과 분리
         soxx_1y_atr = _calculate_1y_atr("SOXX", "SOXX_ATR_1Y", 2.93)
         base_amp = round(-(soxx_1y_atr * 3), 2)
-        target_drop = round(base_amp * weight, 2)
+        target_drop = base_amp
         
         return latest_hv, weight, target_drop, base_amp
         

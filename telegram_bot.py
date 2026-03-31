@@ -141,6 +141,23 @@ class TelegramController:
 
             tracking_cache = context.job_queue.jobs()[0].data.get('sniper_tracking', {}) if context.job_queue and context.job_queue.jobs() else {}
 
+            est = pytz.timezone('US/Eastern')
+            now_est = datetime.datetime.now(est)
+            
+            # 💡 [V3.2 패치] 타임라인 통제: 정규장 개장(09:30) 후 50분이 지났는지(10:20) 판별
+            is_sniper_active_time = False
+            try:
+                nyse = mcal.get_calendar('NYSE')
+                schedule = nyse.schedule(start_date=now_est.date(), end_date=now_est.date())
+                if not schedule.empty:
+                    market_open = schedule.iloc[0]['market_open'].astimezone(est)
+                    switch_time = market_open + datetime.timedelta(minutes=50) # 10:20 EST
+                    if now_est >= switch_time:
+                        is_sniper_active_time = True
+            except Exception:
+                if now_est.weekday() < 5 and now_est.time() >= datetime.time(10, 20):
+                    is_sniper_active_time = True
+
             for t in sorted_tickers:
                 h = holdings.get(t, {'qty':0, 'avg':0})
                 curr = await asyncio.to_thread(self.broker.get_current_price, t, is_market_closed=(status_code == "CLOSE"))
@@ -156,7 +173,9 @@ class TelegramController:
                 idx_ticker = "SOXX" if t == "SOXL" else "QQQ"
                 
                 dynamic_pct_obj = await asyncio.to_thread(self.broker.get_dynamic_sniper_target, idx_ticker)
-                dynamic_pct = float(dynamic_pct_obj) if dynamic_pct_obj is not None else (7.59 if t == "SOXL" else 6.18)
+                
+                # 💡 [V3.2 패치] 타격선은 가중치가 배제된 절대 앵커값으로 고정 (기본값 방어막 포함)
+                dynamic_pct = float(dynamic_pct_obj) if dynamic_pct_obj is not None else (8.79 if t == "SOXL" else 4.95)
                 
                 tracking_status = tracking_cache.get(t, {})
                 current_day_high = tracking_status.get('day_high', day_high) 
@@ -208,7 +227,8 @@ class TelegramController:
                     'day_low': day_low,
                     'prev_close': safe_prev_close,
                     'tracking_info': tracking_status,
-                    'dynamic_obj': dynamic_pct_obj
+                    'dynamic_obj': dynamic_pct_obj,
+                    'is_sniper_active_time': is_sniper_active_time  # 💡 [V3.2 패치] 방향타 락온 상태 전달
                 })
                 total_buy_needed += sum(o['price']*o['qty'] for o in plan['orders'] if o['side']=='BUY')
 
@@ -524,11 +544,32 @@ class TelegramController:
         
         status_msg = await update.message.reply_text("⏳ <b>실시간 시장 지표(HV/VXN) 연산 중...</b>", parse_mode='HTML')
         
+        est = pytz.timezone('US/Eastern')
+        now_est = datetime.datetime.now(est)
+        
+        # 💡 [V3.2 패치] 타임라인 통제 상태 조회
+        is_sniper_active_time = False
+        try:
+            nyse = mcal.get_calendar('NYSE')
+            schedule = nyse.schedule(start_date=now_est.date(), end_date=now_est.date())
+            if not schedule.empty:
+                market_open = schedule.iloc[0]['market_open'].astimezone(est)
+                switch_time = market_open + datetime.timedelta(minutes=50) # 10:20 EST
+                if now_est >= switch_time:
+                    is_sniper_active_time = True
+        except Exception:
+            if now_est.weekday() < 5 and now_est.time() >= datetime.time(10, 20):
+                is_sniper_active_time = True
+
         for t in active_tickers:
             if self.cfg.get_version(t) == "V17":
                 atr_data[t] = await asyncio.to_thread(self.broker.get_atr_data, t)
                 idx_ticker = "SOXX" if t == "SOXL" else "QQQ"
                 dynamic_target_data[t] = await asyncio.to_thread(self.broker.get_dynamic_sniper_target, idx_ticker)
+                
+                # 💡 [V3.2 패치] 객체 내부에 스위치 상태를 주입하여 뷰어로 전달
+                if dynamic_target_data[t] is not None:
+                    dynamic_target_data[t].is_sniper_active_time = is_sniper_active_time
             else:
                 atr_data[t] = (0.0, 0.0)
                 dynamic_target_data[t] = None
