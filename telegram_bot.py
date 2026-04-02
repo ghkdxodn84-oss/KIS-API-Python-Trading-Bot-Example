@@ -242,7 +242,6 @@ class TelegramController:
                         is_first_half = t_val < (split / 2)
                         secret_quarter_target = plan.get('star_price', 0.0) if is_first_half else math.ceil(actual_avg * 1.005 * 100) / 100.0
 
-                # 💡 [핵심 수술] 가짜 더미 데이터 소각 및 실제 백엔드 절대 수치(metric_val) 파이프라인 연결
                 if dynamic_pct_obj and hasattr(dynamic_pct_obj, 'metric_val'):
                     real_val = float(dynamic_pct_obj.metric_val)
                     real_name = dynamic_pct_obj.metric_name
@@ -250,13 +249,15 @@ class TelegramController:
                     real_val = 0.0
                     real_name = "지표"
                     
-                vol_status = "ON 권장" if real_val >= 20.0 else "OFF 권장"
+                # 💡 [핵심 수술] '권장' 문구 압축 소각 적용
+                vol_status = "ON" if real_val >= 20.0 else "OFF"
 
                 ticker_data_list.append({
                     'ticker': t, 'version': ver, 't_val': t_val, 'split': split, 'curr': curr, 'avg': actual_avg, 'qty': actual_qty,
                     'profit_amt': (curr - actual_avg) * actual_qty if actual_qty > 0 else 0, 
                     'profit_pct': (curr - actual_avg) / actual_avg * 100 if actual_avg > 0 else 0,
-                    'upward_sniper': "ON" if self.cfg.get_upward_sniper_mode() else "OFF",
+                    # 💡 [핵심 수술] 종목별 독립 상태(get_upward_sniper_mode(t)) 연동
+                    'upward_sniper': "ON" if self.cfg.get_upward_sniper_mode(t) else "OFF",
                     'target': self.cfg.get_target_profit(t), 'star_pct': round(plan.get('star_ratio', 0) * 100, 2) if 'star_ratio' in plan else 0.0,
                     'seed': seed, 'one_portion': plan.get('one_portion', 0.0), 'plan': plan,
                     'is_locked': is_already_ordered, 'mode': "REG",
@@ -274,7 +275,7 @@ class TelegramController:
                     'tracking_info': tracking_status,
                     'dynamic_obj': dynamic_pct_obj,
                     'is_sniper_active_time': is_sniper_active_time,
-                    'vol_weight': round(real_val, 2),  # 💡 실제 팩트 절대 수치 탑재
+                    'vol_weight': round(real_val, 2), 
                     'vol_status': vol_status  
                 })
                 total_buy_needed += sum(o['price']*o['qty'] for o in plan['orders'] if o['side']=='BUY')
@@ -560,14 +561,14 @@ class TelegramController:
             await update.message.reply_text(msg, parse_mode='HTML')
             return
 
-        # 💡 [핵심 수술] 실제 백엔드 데이터(dynamic_target_data) 100% 연결 완료
+        # 💡 [핵심 수술] 텍스트 다이어트 (권장 삭제) 및 종목별 독립 제어 버튼 렌더링
         report = "📊 <b>[ 자율주행 변동성 마스터 지표 상세 분석 ]</b>\n\n"
         
-        report += "<b>[ 🧭 지수 범위 범례 (당일 절대 수치 기준) ]</b>\n"
-        report += "🧊 <code>~ 15.00</code> : 극저변동성 (OFF 권장)\n"
-        report += "🟩 <code>15.00 ~ 20.00</code> : 정상 궤도 (OFF 권장)\n"
-        report += "🟨 <code>20.00 ~ 25.00</code> : 변동성 확대 (ON 권장)\n"
-        report += "🟥 <code>25.00 이상 </code> : 패닉 셀링 (ON 권장)\n\n"
+        report += "<b>[ 🧭 지수 범위 범례 (ON/OFF 권장) ]</b>\n"
+        report += "🧊 <code>~ 15.00</code> : 극저변동성 (OFF)\n"
+        report += "🟩 <code>15.00 ~ 20.00</code> : 정상 궤도 (OFF)\n"
+        report += "🟨 <code>20.00 ~ 25.00</code> : 변동성 확대 (ON)\n"
+        report += "🟥 <code>25.00 이상 </code> : 패닉 셀링 (ON)\n\n"
         
         for t in active_tickers:
             idx_ticker = "SOXX" if t == "SOXL" else "QQQ"
@@ -581,13 +582,13 @@ class TelegramController:
                 real_name = "지표"
             
             if real_val <= 15.0:
-                diag_text = "극저변동성 (우측 꼬리 절단 방지를 위해 스나이퍼 OFF 권장)"
+                diag_text = "극저변동성 (우측 꼬리 절단 방지를 위해 스나이퍼 OFF)"
                 status_icon = "🧊"
             elif real_val <= 20.0:
-                diag_text = "정상 궤도 안착 (스나이퍼 OFF 권장)"
+                diag_text = "정상 궤도 안착 (스나이퍼 OFF)"
                 status_icon = "🟩"
             elif real_val <= 25.0:
-                diag_text = "변동성 확대 장세 (계좌 방어를 위해 스나이퍼 ON 권장)"
+                diag_text = "변동성 확대 장세 (계좌 방어를 위해 스나이퍼 ON)"
                 status_icon = "🟨"
             else:
                 diag_text = "패닉 셀링 및 시스템 충격 (스나이퍼 필수 가동)"
@@ -599,10 +600,19 @@ class TelegramController:
 
         report += "⚠️ <b>[매도 엔진 충돌 경고]</b> 스나이퍼 수동 가동 시 VWAP 매도 엔진과 충돌합니다. 스나이퍼가 명중하여 KIS 원장에 체결 이력이 기록될 경우, 다중 매도 방지 락온 로직에 의해 당일 VWAP 매도 스케줄러는 즉각 가동 중단(Lock-down) 처리됩니다.\n\n"
         
-        is_sniper = self.cfg.get_upward_sniper_mode()
-        report += f"🎯 <b>[ 수동 상방 스나이퍼 제어 ]</b>\n현재 상태: {'ON (가동중)' if is_sniper else 'OFF (대기중)'}\n"
-        
-        keyboard = [[InlineKeyboardButton("⚪ OFF", callback_data="MODE:OFF"), InlineKeyboardButton("🎯 ON", callback_data="MODE:ON")]]
+        # 💡 [핵심 수술] 글로벌 스위치 파기 및 종목별 독립 제어 버튼 생성
+        report += "🎯 <b>[ 수동 상방 스나이퍼 독립 제어 ]</b>\n"
+        keyboard = []
+        for t in active_tickers:
+            is_sniper = self.cfg.get_upward_sniper_mode(t)
+            status_txt = 'ON (가동중)' if is_sniper else 'OFF (대기중)'
+            report += f"▫️ {t} 현재 상태 : {status_txt}\n"
+            
+            keyboard.append([
+                InlineKeyboardButton(f"{t} ⚪ OFF", callback_data=f"MODE:OFF:{t}"), 
+                InlineKeyboardButton(f"{t} 🎯 ON", callback_data=f"MODE:ON:{t}")
+            ])
+            
         await update.message.reply_text(report, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
 
     async def cmd_reset(self, update, context):
@@ -822,9 +832,14 @@ class TelegramController:
         elif action == "TICKER":
             self.cfg.set_active_tickers([sub] if sub != "ALL" else ["SOXL", "TQQQ"])
             await query.edit_message_text(f"✅ 운용 종목 변경: {sub}")
+            
+        # 💡 [핵심 수술] 콜백 라우터 개조: 종목별 독립 제어 스위칭 신호 처리
         elif action == "MODE":
-            self.cfg.set_upward_sniper_mode(sub == "ON")
-            await query.edit_message_text(f"✅ 상방 스나이퍼 모드 변경 완료: {'🎯 ON (가동중)' if sub == 'ON' else '⚪ OFF (대기중)'}")
+            mode_val = sub
+            ticker = data[2] if len(data) > 2 else "SOXL" # 호환성 방어
+            self.cfg.set_upward_sniper_mode(ticker, mode_val == "ON")
+            await query.edit_message_text(f"✅ <b>[{ticker}]</b> 상방 스나이퍼 모드 변경 완료: {'🎯 ON (가동중)' if mode_val == 'ON' else '⚪ OFF (대기중)'}", parse_mode='HTML')
+            
         elif action == "SEED":
             ticker = data[2]
             self.user_states[update.effective_chat.id] = f"SEED_{sub}_{ticker}"

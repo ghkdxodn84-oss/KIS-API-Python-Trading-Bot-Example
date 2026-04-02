@@ -445,16 +445,16 @@ class TelegramView:
                 if target_obj is not None and hasattr(target_obj, 'metric_val'):
                     m_val = target_obj.metric_val
                     m_name = target_obj.metric_name
-                    m_base = float(target_obj.metric_base)
-                    weight = target_obj.weight
                     base_amp = abs(target_obj.base_amp)
                     
+                    # 💡 [핵심 수술] 가중치(비율) 연산 완전 소각 및 절대 수치(m_val) 기반 UI 표출
                     msg += f"📊 <b>실시간 동적 변동성 (V3.2 마스터 스위치):</b>\n"
                     msg += f"▫️ ATR5 ({atr5:.1f}%) / ATR14 ({atr14:.1f}%)\n"
-                    msg += f"▫️ {m_name}: {m_val:.2f} / {m_base:.2f}\n     (가중치 {weight:.2f}배)\n"
+                    msg += f"▫️ {m_name} (당일 절대지수): {m_val:.2f}\n"
                     msg += f"▫️ 고정 타격선(1년 ATR): -{base_amp:.2f}%\n"
                     
-                    if weight <= 1.0:
+                    # 💡 절대 수치(VXN 등) 기준 임계점 20.0을 상방/하방 분기점으로 적용
+                    if m_val <= 20.0:
                         msg += f"▫️ 자율제어: 🔫하방[ON] / 🛡️상방[OFF]\n\n"
                     else:
                         msg += f"▫️ 자율제어: 🔫하방[OFF] / 🛡️상방[ON]\n\n"
@@ -462,7 +462,7 @@ class TelegramView:
                     base_amp = 8.79 if t == "SOXL" else 4.95
                     msg += f"📊 <b>실시간 동적 변동성 (V3.2 마스터 스위치):</b>\n"
                     msg += f"▫️ ATR5 ({atr5:.1f}%) / ATR14 ({atr14:.1f}%)\n"
-                    msg += f"▫️ 지표 연산 실패\n     (가중치 1.00배 기본값 방어 중)\n"
+                    msg += f"▫️ 지표 연산 실패 (기본값 방어 중)\n"
                     msg += f"▫️ 고정 타격선(1년 ATR): -{base_amp:.2f}%\n"
                     msg += f"▫️ 자율제어: 🔫하방[ON] / 🛡️상방[OFF]\n\n"
                     

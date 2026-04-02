@@ -26,7 +26,8 @@ class ConfigManager:
             "HISTORY": "data/manual_history.json",  
             "SPLIT": "data/split_config.json",
             "TICKER": "data/active_tickers.json",
-            "UPWARD_SNIPER": "data/upward_sniper.dat", 
+            # 💡 [핵심 수술] 단일 파일(.dat)에서 종목별 다중 딕셔너리(.json) 파일로 승격
+            "UPWARD_SNIPER": "data/upward_sniper.json", 
             "SECRET_MODE": "data/secret_mode.dat",
             "PROFIT_CFG": "data/profit_config.json",
             "LOCKS": "data/trade_locks.json",
@@ -36,7 +37,7 @@ class ConfigManager:
             "REVERSE_CFG": "data/reverse_config.json",
             "SNIPER_MULTIPLIER_CFG": "data/sniper_multiplier.json",
             "SPLIT_HISTORY": "data/split_history.json",
-            "P_TRADE_DATA": "data/p_trade_data.json"  # 💡 [핵심 수술] P매매 전용 데이터베이스 추가
+            "P_TRADE_DATA": "data/p_trade_data.json"  
         }
         
         self.DEFAULT_SEED = {"SOXL": 6720.0, "TQQQ": 6720.0}
@@ -249,9 +250,6 @@ class ConfigManager:
                 r['avg_price'] = actual_avg
             self._save_json(self.FILES["LEDGER"], ledger)
 
-    # ==========================================================
-    # 💡 [핵심 수술] LOC/MOC 단가 소급 업데이트 (실제 체결가 핀셋 교정)
-    # ==========================================================
     def calibrate_ledger_prices(self, ticker, target_date_str, exec_history):
         if not exec_history:
             return 0
@@ -286,7 +284,6 @@ class ConfigManager:
         for r in ledger:
             if r.get('ticker') == ticker and r.get('date') == target_date_str:
                 exec_id = str(r.get('exec_id', ''))
-                # INIT(초기화)나 CALIB(비파괴 보정) 등 특수 시스템 행은 건드리지 않음
                 if 'INIT' in exec_id or 'CALIB' in exec_id:
                     continue
                     
@@ -310,6 +307,9 @@ class ConfigManager:
         self._save_json(self.FILES["LEDGER"], remaining)
         self.set_reverse_state(ticker, False, 0, 0.0)
         self.clear_escrow_cash(ticker)
+# ==========================================================
+# [config.py] - Part 2 (이어서 작성)
+# ==========================================================
 
     def calculate_holdings(self, ticker, records=None):
         if records is None:
@@ -588,11 +588,17 @@ class ConfigManager:
         d[t] = float(v)
         self._save_json(self.FILES["SNIPER_MULTIPLIER_CFG"], d)
 
-    def get_upward_sniper_mode(self):
-        return self._load_file(self.FILES["UPWARD_SNIPER"]) == 'True'
+    # ==========================================================
+    # 💡 [핵심 수술] 스나이퍼 상태 종목별(ticker) 독립 제어 개조
+    # ==========================================================
+    def get_upward_sniper_mode(self, ticker):
+        d = self._load_json(self.FILES["UPWARD_SNIPER"], {})
+        return d.get(ticker, False)
 
-    def set_upward_sniper_mode(self, v):
-        self._save_file(self.FILES["UPWARD_SNIPER"], str(v))
+    def set_upward_sniper_mode(self, ticker, v):
+        d = self._load_json(self.FILES["UPWARD_SNIPER"], {})
+        d[ticker] = bool(v)
+        self._save_json(self.FILES["UPWARD_SNIPER"], d)
 
     def get_secret_mode(self):
         return self._load_file(self.FILES["SECRET_MODE"]) == 'True'
@@ -614,25 +620,13 @@ class ConfigManager:
         self._save_file(self.FILES["CHAT_ID"], v)
 
     # ==========================================================
-    # 💡 [핵심 수술] P매매 (VWAP) 전용 데이터베이스 I/O 엔진 추가
+    # 💡 P매매 (VWAP) 전용 데이터베이스 I/O 엔진
     # ==========================================================
     def get_p_trade_data(self):
-        """
-        P매매 다중 타겟 대기열 데이터를 로드합니다.
-        데이터 구조 예시:
-        {
-            "SOXL": [
-                {"side": "SELL", "target_price": 45.50, "qty": 20, "rem_qty": 20},
-                {"side": "BUY", "target_price": 42.00, "qty": 30, "rem_qty": 30}
-            ]
-        }
-        """
         return self._load_json(self.FILES["P_TRADE_DATA"], {})
 
     def set_p_trade_data(self, data):
-        """ P매매 대기열 데이터를 저장합니다. """
         self._save_json(self.FILES["P_TRADE_DATA"], data)
 
     def clear_p_trade_data(self):
-        """ 장 마감 후 또는 초기화 시 P매매 대기열을 완전히 비웁니다. """
         self._save_json(self.FILES["P_TRADE_DATA"], {})
