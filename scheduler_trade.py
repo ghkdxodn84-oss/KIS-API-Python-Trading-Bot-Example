@@ -84,6 +84,11 @@ async def scheduled_sniper_monitor(context):
             
             for t in cfg.get_active_tickers():
                 version = cfg.get_version(t)
+                
+                # 💡 [핵심 수술] VWAP 데스존(15:29 ~ 15:45) 엇갈림 방지를 위한 스나이퍼 조기 퇴근
+                if version == "V_VWAP" and now_est.hour == 15 and now_est.minute >= 29:
+                    continue
+                
                 is_upward_sniper_on = cfg.get_upward_sniper_mode()
                 
                 # 💡 [수술 완료] VWAP 모드에서도 12% 잭팟과 상방 스나이퍼가 정상 작동하도록 차단벽 철거
@@ -163,7 +168,7 @@ async def scheduled_sniper_monitor(context):
                                     tracking_info['lowest_price'] = c_low
                                     
                                     if not tracking_info['alerted']:
-                                        msg = f"🎯 <b>[{t}] 하방 매수 스나이퍼 안전장치 해제 (Armed)!</b>\n"
+                                        msg = f"🎯 <b>[{t}] 하방 매 매수 스나이퍼 안전장치 해제 (Armed)!</b>\n"
                                         msg += f"📈 <b>장중 고점: ${tracking_info['day_high']:.2f}</b>\n"
                                         msg += f"📉 <b>에너지 소진: -{abs(sniper_pct):.2f}% (방어선 ${tracking_info['armed_price']:.2f} 돌파)</b>\n"
                                         msg += f"👀 진짜 바닥을 다질 때까지 발목을 노리며 추적을 시작합니다."
@@ -179,7 +184,6 @@ async def scheduled_sniper_monitor(context):
                                     rebound_pct = (c_close - tracking_info['lowest_price']) / tracking_info['lowest_price'] * 100 if tracking_info['lowest_price'] > 0 else 0
                                     is_rebounded = rebound_pct >= trigger_pct
                                     
-                                    # 💡 [핵심 수술] 거래량 정배열 초과 필터 철거 및 순수 MA20 돌파 단일 조건 적용
                                     if is_regular_session:
                                         is_volume_spike = (c_vol > c_vol_ma20)
                                     else:
