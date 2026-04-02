@@ -242,9 +242,15 @@ class TelegramController:
                         is_first_half = t_val < (split / 2)
                         secret_quarter_target = plan.get('star_price', 0.0) if is_first_half else math.ceil(actual_avg * 1.005 * 100) / 100.0
 
-                # 💡 [핵심 수술] 뷰어로 전달할 가중치 팩트 데이터 파이프라인 주입
-                dummy_weight = 1.15 if t == "SOXL" else 0.85
-                vol_status = "ON 권장" if dummy_weight > 1.0 else "OFF 권장"
+                # 💡 [핵심 수술] 가짜 더미 데이터 소각 및 실제 백엔드 절대 수치(metric_val) 파이프라인 연결
+                if dynamic_pct_obj and hasattr(dynamic_pct_obj, 'metric_val'):
+                    real_val = float(dynamic_pct_obj.metric_val)
+                    real_name = dynamic_pct_obj.metric_name
+                else:
+                    real_val = 0.0
+                    real_name = "지표"
+                    
+                vol_status = "ON 권장" if real_val >= 20.0 else "OFF 권장"
 
                 ticker_data_list.append({
                     'ticker': t, 'version': ver, 't_val': t_val, 'split': split, 'curr': curr, 'avg': actual_avg, 'qty': actual_qty,
@@ -268,8 +274,8 @@ class TelegramController:
                     'tracking_info': tracking_status,
                     'dynamic_obj': dynamic_pct_obj,
                     'is_sniper_active_time': is_sniper_active_time,
-                    'vol_weight': dummy_weight,  # 💡 1줄 요약 렌더링 변수
-                    'vol_status': vol_status     # 💡 1줄 요약 렌더링 변수
+                    'vol_weight': round(real_val, 2),  # 💡 실제 팩트 절대 수치 탑재
+                    'vol_status': vol_status  
                 })
                 total_buy_needed += sum(o['price']*o['qty'] for o in plan['orders'] if o['side']=='BUY')
 
@@ -280,6 +286,9 @@ class TelegramController:
         final_msg, markup = self.view.create_sync_report(status_text, dst_txt, cash, rp_amount, ticker_data_list, status_code in ["PRE", "REG"], p_trade_data=p_trade_data)
         
         await update.message.reply_text(final_msg, reply_markup=markup, parse_mode='HTML')
+# ==========================================================
+# [telegram_bot.py] - Part 2 (이어서 작성)
+# ==========================================================
 
     async def cmd_record(self, update, context):
         if not self._is_admin(update): return
@@ -412,9 +421,6 @@ class TelegramController:
                     self.cfg.calibrate_avg_price(ticker, actual_avg)
                     await context.bot.send_message(chat_id, f"🔧 <b>[{ticker}] 장부 평단가 미세 오차({price_diff:.4f}) 교정 완료!</b>", parse_mode='HTML')
                 elif diff != 0:
-                    # ==========================================================
-                    # 💡 [복구 완료] TrueSync 비파괴 보정(CALIB) 로직 100% 원본 복원
-                    # ==========================================================
                     temp_recs = [r for r in recs if r['date'] != target_ledger_str or 'INIT' in str(r.get('exec_id', ''))]
                     temp_qty, temp_avg, _, _ = self.cfg.calculate_holdings(ticker, temp_recs)
                     
@@ -527,25 +533,6 @@ class TelegramController:
         if query: await query.edit_message_text(msg, reply_markup=markup, parse_mode='HTML')
         elif message_obj: await message_obj.edit_text(msg, reply_markup=markup, parse_mode='HTML')
         else: await context.bot.send_message(chat_id, msg, reply_markup=markup, parse_mode='HTML')
-# ==========================================================
-# [telegram_bot.py] - Part 2 (이어서 작성)
-# ==========================================================
-
-    def _render_gauge(self, weight):
-        """가중치 임계점(1.0) 기준 1차원 동적 스펙트럼 게이지 렌더링"""
-        if weight <= 0.80:
-            state = "극저변동성 (우측 꼬리 절단 방지를 위해 스나이퍼 OFF 권장)"
-            gauge = "[ -💠- 🧊 ---- 🟩 ---- |(1.0) ---- 🟨 ---- 🟥 ]"
-        elif weight <= 1.00:
-            state = "정상 궤도 안착 (스나이퍼 OFF 권장)"
-            gauge = "[ 🧊 ---- 🟩 -💠- |(1.0) ---- 🟨 ---- 🟥 ]"
-        elif weight <= 1.20:
-            state = "고변동성 휩소 장세 (계좌 방어를 위해 스나이퍼 ON 권장)"
-            gauge = "[ 🧊 ---- 🟩 ---- |(1.0) -💠- 🟨 ---- 🟥 ]"
-        else:
-            state = "패닉 셀링 및 시스템 충격 (스나이퍼 필수 가동)"
-            gauge = "[ 🧊 ---- 🟩 ---- |(1.0) ---- 🟨 -💠- 🟥 ]"
-        return gauge, state
 
     async def cmd_history(self, update, context):
         if not self._is_admin(update): return
@@ -573,27 +560,42 @@ class TelegramController:
             await update.message.reply_text(msg, parse_mode='HTML')
             return
 
-        # 💡 [핵심 수술] 지수 범위(범례) 상단 고정 표출 및 2-Tier 렌더링
+        # 💡 [핵심 수술] 실제 백엔드 데이터(dynamic_target_data) 100% 연결 완료
         report = "📊 <b>[ 자율주행 변동성 마스터 지표 상세 분석 ]</b>\n\n"
         
-        report += "<b>[ 🧭 지수 범위 범례 ]</b>\n"
-        report += "🧊 <code>0.50 ~ 0.80</code> : 극저변동성 (OFF 권장)\n"
-        report += "🟩 <code>0.80 ~ 1.00</code> : 정상 궤도 (OFF 권장)\n"
-        report += "🟨 <code>1.00 ~ 1.20</code> : 변동성 확대 (ON 권장)\n"
-        report += "🟥 <code>1.20 이상  </code> : 패닉 셀링 (ON 권장)\n\n"
+        report += "<b>[ 🧭 지수 범위 범례 (당일 절대 수치 기준) ]</b>\n"
+        report += "🧊 <code>~ 15.00</code> : 극저변동성 (OFF 권장)\n"
+        report += "🟩 <code>15.00 ~ 20.00</code> : 정상 궤도 (OFF 권장)\n"
+        report += "🟨 <code>20.00 ~ 25.00</code> : 변동성 확대 (ON 권장)\n"
+        report += "🟥 <code>25.00 이상 </code> : 패닉 셀링 (ON 권장)\n\n"
         
         for t in active_tickers:
-            # 예비 데이터 연산 (실제 KIS/야후 파이낸스 백엔드 연동 팩트 데이터로 치환됨)
-            dummy_vxn = 26.4 if t == "SOXL" else 18.2
-            dummy_hv = 135.2 if t == "SOXL" else 85.2
-            dummy_weight = 1.15 if t == "SOXL" else 0.85
+            idx_ticker = "SOXX" if t == "SOXL" else "QQQ"
+            dynamic_pct_obj = await asyncio.to_thread(self.broker.get_dynamic_sniper_target, idx_ticker)
             
-            gauge_str, diag_text = self._render_gauge(dummy_weight)
+            if dynamic_pct_obj and hasattr(dynamic_pct_obj, 'metric_val'):
+                real_val = float(dynamic_pct_obj.metric_val)
+                real_name = dynamic_pct_obj.metric_name
+            else:
+                real_val = 0.0
+                real_name = "지표"
+            
+            if real_val <= 15.0:
+                diag_text = "극저변동성 (우측 꼬리 절단 방지를 위해 스나이퍼 OFF 권장)"
+                status_icon = "🧊"
+            elif real_val <= 20.0:
+                diag_text = "정상 궤도 안착 (스나이퍼 OFF 권장)"
+                status_icon = "🟩"
+            elif real_val <= 25.0:
+                diag_text = "변동성 확대 장세 (계좌 방어를 위해 스나이퍼 ON 권장)"
+                status_icon = "🟨"
+            else:
+                diag_text = "패닉 셀링 및 시스템 충격 (스나이퍼 필수 가동)"
+                status_icon = "🟥"
             
             report += f"💠 <b>[ {t} 국면 분석 ]</b>\n"
-            report += f"▫️ 당일 VXN: {dummy_vxn} / 타겟 HV: {dummy_hv} (가중치: {dummy_weight})\n"
-            report += f"▫️ 국면 <code>{gauge_str}</code>\n"
-            report += f"▫️ 진단 : {diag_text}\n\n"
+            report += f"▫️ 당일 절대 지수({real_name}): {real_val:.2f}\n"
+            report += f"▫️ 진단 : {status_icon} {diag_text}\n\n"
 
         report += "⚠️ <b>[매도 엔진 충돌 경고]</b> 스나이퍼 수동 가동 시 VWAP 매도 엔진과 충돌합니다. 스나이퍼가 명중하여 KIS 원장에 체결 이력이 기록될 경우, 다중 매도 방지 락온 로직에 의해 당일 VWAP 매도 스케줄러는 즉각 가동 중단(Lock-down) 처리됩니다.\n\n"
         
