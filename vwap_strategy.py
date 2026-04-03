@@ -75,10 +75,11 @@ class VwapStrategy:
             return now.minute - 30
         return -1
 
-    def get_vwap_plan(self, ticker, current_price, remaining_target, side="BUY"):
+    def get_vwap_plan(self, ticker, current_price, remaining_target, side="BUY", vwap_status=None):
         """
         [VWAP 동적 슬라이싱 엔진]
         remaining_target: BUY일 경우 '남은 매수 예산(USD)', SELL일 경우 '남은 매도 수량(주)'
+        vwap_status: strategy 코어 모듈에서 전달된 당일 VWAP 거래량 지배력 플래그
         """
         bin_idx = self._get_current_bin_index()
         
@@ -86,6 +87,15 @@ class VwapStrategy:
             return {
                 "orders": [], 
                 "process_status": "⏳VWAP대기/종료", 
+                "allocated_qty": 0,
+                "bin_weight": 0.0
+            }
+
+        # 🛡️ [V23.12 패치] Strong Up 추세장 판별 시 고점 매수(FOMO) 원천 차단 (Hold)
+        if side == "BUY" and vwap_status and vwap_status.get("is_strong_up", False):
+            return {
+                "orders": [], 
+                "process_status": "⛔VWAP매수보류(StrongUp추세장)", 
                 "allocated_qty": 0,
                 "bin_weight": 0.0
             }

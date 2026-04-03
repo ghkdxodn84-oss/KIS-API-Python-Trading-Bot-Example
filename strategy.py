@@ -6,6 +6,7 @@ import math
 import os
 import json
 import tempfile
+import pandas as pd
 from datetime import datetime, timedelta
 
 class InfiniteStrategy:
@@ -39,12 +40,79 @@ class InfiniteStrategy:
         except Exception:
             pass
 
-    def get_plan(self, ticker, current_price, avg_price, qty, prev_close, ma_5day=0.0, market_type="REG", available_cash=0, is_simulation=False):
+    # ==========================================================
+    # 🛡️ [V23.12 패치] VWAP 시장 미시구조 거래량 지배력 코어 엔진
+    # ==========================================================
+    def analyze_vwap_dominance(self, df):
+        """
+        1분봉 데이터프레임을 받아 당일 VWAP 지배력을 연산합니다.
+        df는 'Open', 'Close', 'Volume', 'High', 'Low' 컬럼이 존재해야 합니다.
+        """
+        if df is None or len(df) < 10:
+            return {"vwap_price": 0.0, "is_strong_up": False, "is_strong_down": False}
+            
+        try:
+            if 'High' in df.columns and 'Low' in df.columns:
+                typical_price = (df['High'] + df['Low'] + df['Close']) / 3.0
+            else:
+                typical_price = df['Close']
+                
+            vol_x_price = typical_price * df['Volume']
+            total_vol = df['Volume'].sum()
+            
+            if total_vol == 0:
+                return {"vwap_price": 0.0, "is_strong_up": False, "is_strong_down": False}
+                
+            vwap_price = vol_x_price.sum() / total_vol
+            
+            # 누적 VWAP 기울기 연산
+            df_temp = pd.DataFrame()
+            df_temp['Volume'] = df['Volume']
+            df_temp['Vol_x_Price'] = vol_x_price
+            df_temp['Cum_Vol'] = df_temp['Volume'].cumsum()
+            df_temp['Cum_Vol_Price'] = df_temp['Vol_x_Price'].cumsum()
+            df_temp['Running_VWAP'] = df_temp['Cum_Vol_Price'] / df_temp['Cum_Vol']
+            
+            idx_10pct = int(len(df_temp) * 0.1)
+            vwap_start = df_temp['Running_VWAP'].iloc[idx_10pct]
+            vwap_end = df_temp['Running_VWAP'].iloc[-1]
+            vwap_slope = vwap_end - vwap_start
+            
+            # 거래량 지배력 (VWAP 위/아래 체결량 비율)
+            vol_above = df[df['Close'] > vwap_price]['Volume'].sum()
+            vol_below = df[df['Close'] <= vwap_price]['Volume'].sum()
+            
+            vol_above_pct = vol_above / total_vol if total_vol > 0 else 0
+            vol_below_pct = vol_below / total_vol if total_vol > 0 else 0
+            
+            daily_open = df['Open'].iloc[0] if 'Open' in df.columns else df['Close'].iloc[0]
+            daily_close = df['Close'].iloc[-1]
+            
+            is_up_day = daily_close > daily_open
+            is_down_day = daily_close < daily_open
+            
+            is_strong_up = is_up_day and (vwap_slope > 0) and (vol_above_pct > 0.5)
+            is_strong_down = is_down_day and (vwap_slope < 0) and (vol_below_pct > 0.5)
+            
+            return {
+                "vwap_price": round(vwap_price, 2),
+                "is_strong_up": bool(is_strong_up),
+                "is_strong_down": bool(is_strong_down),
+                "vol_above_pct": round(vol_above_pct, 4),
+                "vwap_slope": round(vwap_slope, 4)
+            }
+        except Exception as e:
+            return {"vwap_price": 0.0, "is_strong_up": False, "is_strong_down": False}
+
+    def get_plan(self, ticker, current_price, avg_price, qty, prev_close, ma_5day=0.0, market_type="REG", available_cash=0, is_simulation=False, vwap_status=None):
         core_orders = []
         bonus_orders = []
         smart_core_orders = []   
         smart_bonus_orders = []  
         process_status = "" 
+        
+        # 외부 VWAP 플래그 전파용 캐시
+        tr_info = {"vwap_status": vwap_status} if vwap_status else {}
         
         # 스나이퍼 잠금 상태 실시간 확인
         lock_s_sell = self.cfg.check_lock(ticker, "SNIPER_SELL")
@@ -163,14 +231,14 @@ class InfiniteStrategy:
 
         base_price = current_price if current_price > 0 else prev_close
         if base_price <= 0: 
-            return {"orders": [], "core_orders": [], "bonus_orders": [], "smart_core_orders": [], "smart_bonus_orders": [], "t_val": t_val, "one_portion": one_portion_amt, "process_status": "⛔가격오류", "is_reverse": is_reverse, "star_price": star_price, "star_ratio": star_ratio, "real_cash_used": real_available_cash, "tracking_info": {}}
+            return {"orders": [], "core_orders": [], "bonus_orders": [], "smart_core_orders": [], "smart_bonus_orders": [], "t_val": t_val, "one_portion": one_portion_amt, "process_status": "⛔가격오류", "is_reverse": is_reverse, "star_price": star_price, "star_ratio": star_ratio, "real_cash_used": real_available_cash, "tracking_info": tr_info}
 
         if market_type == "PRE_CHECK":
             process_status = "🌅프리마켓"
             if qty > 0 and target_price > 0 and current_price >= target_price and not is_reverse:
                 core_orders.append({"side": "SELL", "price": current_price, "qty": qty, "type": "LIMIT", "desc": "🌅프리:목표돌파익절"})
             orders = core_orders + bonus_orders
-            return {"orders": orders, "core_orders": core_orders, "bonus_orders": bonus_orders, "smart_core_orders": [], "smart_bonus_orders": [], "t_val": t_val, "one_portion": one_portion_amt, "process_status": process_status, "is_reverse": is_reverse, "star_price": star_price, "star_ratio": star_ratio, "real_cash_used": real_available_cash, "tracking_info": {}}
+            return {"orders": orders, "core_orders": core_orders, "bonus_orders": bonus_orders, "smart_core_orders": [], "smart_bonus_orders": [], "t_val": t_val, "one_portion": one_portion_amt, "process_status": process_status, "is_reverse": is_reverse, "star_price": star_price, "star_ratio": star_ratio, "real_cash_used": real_available_cash, "tracking_info": tr_info}
 
         if market_type == "REG":
             if qty == 0:
@@ -180,7 +248,7 @@ class InfiniteStrategy:
                 if buy_qty > 0:
                     core_orders.append({"side": "BUY", "price": buy_price, "qty": buy_qty, "type": "LOC", "desc": "🆕새출발"})
                 orders = core_orders + bonus_orders
-                return {"orders": orders, "core_orders": core_orders, "bonus_orders": bonus_orders, "smart_core_orders": [], "smart_bonus_orders": [], "t_val": t_val, "one_portion": one_portion_amt, "process_status": process_status, "is_reverse": False, "star_price": star_price, "star_ratio": star_ratio, "real_cash_used": real_available_cash, "tracking_info": {}}
+                return {"orders": orders, "core_orders": core_orders, "bonus_orders": bonus_orders, "smart_core_orders": [], "smart_bonus_orders": [], "t_val": t_val, "one_portion": one_portion_amt, "process_status": process_status, "is_reverse": False, "star_price": star_price, "star_ratio": star_ratio, "real_cash_used": real_available_cash, "tracking_info": tr_info}
 
             if is_reverse:
                 sell_divisor = 10 if split <= 20 else 20
@@ -230,7 +298,7 @@ class InfiniteStrategy:
 
                 core_orders, bonus_orders, smart_core_orders, smart_bonus_orders = apply_wash_trade_shield(core_orders, bonus_orders, smart_core_orders, smart_bonus_orders)        
                 orders = core_orders + bonus_orders
-                return {"orders": orders, "core_orders": core_orders, "bonus_orders": bonus_orders, "smart_core_orders": [], "smart_bonus_orders": [], "t_val": t_val, "one_portion": one_portion_amt, "process_status": process_status, "is_reverse": is_reverse, "star_price": star_price, "star_ratio": star_ratio, "real_cash_used": real_available_cash, "tracking_info": {}}
+                return {"orders": orders, "core_orders": core_orders, "bonus_orders": bonus_orders, "smart_core_orders": [], "smart_bonus_orders": [], "t_val": t_val, "one_portion": one_portion_amt, "process_status": process_status, "is_reverse": is_reverse, "star_price": star_price, "star_ratio": star_ratio, "real_cash_used": real_available_cash, "tracking_info": tr_info}
 
             if is_jackpot_reached and (t_val > (split - 1) or is_money_short):
                 process_status = "🎉대박익절(리버스생략)"
@@ -318,5 +386,5 @@ class InfiniteStrategy:
                 "t_val": t_val, "one_portion": one_portion_amt, "process_status": process_status,
                 "is_reverse": is_reverse, "star_price": star_price, "star_ratio": star_ratio,
                 "real_cash_used": real_available_cash,
-                "tracking_info": {} 
+                "tracking_info": tr_info 
             }

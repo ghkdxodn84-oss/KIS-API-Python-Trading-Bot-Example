@@ -284,7 +284,8 @@ class ConfigManager:
         for r in ledger:
             if r.get('ticker') == ticker and r.get('date') == target_date_str:
                 exec_id = str(r.get('exec_id', ''))
-                if 'INIT' in exec_id or 'CALIB' in exec_id:
+                # 💡 [핵심 수술] 'CALIB' 방어벽을 해제하여 비파괴 보정 기록도 팩트 단가로 소급 교정되도록 개조
+                if 'INIT' in exec_id:
                     continue
                     
                 if r['side'] == 'BUY' and actual_buy_price > 0.0:
@@ -630,3 +631,4 @@ class ConfigManager:
 
     def clear_p_trade_data(self):
         self._save_json(self.FILES["P_TRADE_DATA"], {})
+

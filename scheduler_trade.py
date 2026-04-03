@@ -110,6 +110,13 @@ async def scheduled_sniper_monitor(context):
                 prev_c = await asyncio.to_thread(broker.get_previous_close, t)
                 if curr_p <= 0: continue
                 
+                # 💡 [V23.12 패치] 1분봉 데이터 스캔 및 VWAP 거래량 지배력 실시간 판별
+                try:
+                    df_1min = await asyncio.to_thread(broker.get_1min_candles_df, t)
+                    vwap_status = strategy.analyze_vwap_dominance(df_1min)
+                except Exception:
+                    vwap_status = {"vwap_price": 0.0, "is_strong_up": False, "is_strong_down": False}
+
                 actual_day_high, _ = await asyncio.to_thread(broker.get_day_high_low, t)
                 
                 tracking_info = tracking_cache.setdefault(t, {
@@ -193,10 +200,21 @@ async def scheduled_sniper_monitor(context):
                                         is_deep_oversold = True if c_vwap <= 0 else (c_close < c_vwap)
                                         
                                         if is_deep_oversold:
-                                            if cfg.get_secret_mode():
+                                            # 💡 [V23.12 패치] 1번 로직: 기관의 하방 압력(Strong Down)이 강할 때는 데드캣 바운스 무시
+                                            if vwap_status.get('is_strong_down', False):
+                                                now_ts = time.time()
+                                                fail_history = app_data.setdefault('sniper_fail_ts', {})
+                                                if now_ts - fail_history.get(f"{t}_fake_bounce", 0) > 300:
+                                                    msg = f"🛡️ <b>[{t}] 하방 스나이퍼 매수 보류 (Strong Down 필터 가동)</b>\n"
+                                                    msg += f"거래량의 50% 이상이 VWAP 아래로 쏠린 강력한 하락 추세장(기관 패닉셀)입니다.\n"
+                                                    msg += f"어설픈 5분봉 데드캣 바운스에 속지 않고 더 깊은 바닥까지 관망합니다."
+                                                    await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
+                                                    fail_history[f"{t}_fake_bounce"] = now_ts
+                                                continue
                                                 
+                                            if cfg.get_secret_mode():
                                                 ma_5day = await asyncio.to_thread(broker.get_5day_ma, t)
-                                                temp_plan = strategy.get_plan(t, curr_p, avg_price, qty, prev_c, ma_5day=ma_5day, market_type="REG", available_cash=allocated_cash[t], is_simulation=True)
+                                                temp_plan = strategy.get_plan(t, curr_p, avg_price, qty, prev_c, ma_5day=ma_5day, market_type="REG", available_cash=allocated_cash[t], is_simulation=True, vwap_status=vwap_status)
                                                 sniper_budget = temp_plan.get('one_portion', 0.0)
                                                 
                                                 exec_price = min(c_close, tracking_info['armed_price'])
@@ -410,7 +428,7 @@ async def scheduled_sniper_monitor(context):
                             fail_history_j[t] = now_ts
                         
                         ma_5day = await asyncio.to_thread(broker.get_5day_ma, t)
-                        plan = strategy.get_plan(t, curr_p, avg_price, qty, prev_c, ma_5day=ma_5day, market_type="REG", available_cash=allocated_cash[t], is_simulation=True)
+                        plan = strategy.get_plan(t, curr_p, avg_price, qty, prev_c, ma_5day=ma_5day, market_type="REG", available_cash=allocated_cash[t], is_simulation=True, vwap_status=vwap_status)
                         
                         for o in plan.get('core_orders', []) + plan.get('bonus_orders', []):
                             if o['side'] == 'SELL':
@@ -451,6 +469,13 @@ async def scheduled_sniper_monitor(context):
                         tracking_info['peak_price'] = curr_p
                         
                     trailing_drop = 1.5 if t == "SOXL" else 1.0
+                    is_extended_drop = False
+                    
+                    # 💡 [V23.12 패치] 3번 로직: Strong Up 추세장에서 눌림목 익절 방어를 위해 하락 허용치(Drop) 동적 확장
+                    if vwap_status.get('is_strong_up', False):
+                        trailing_drop = max(trailing_drop, 3.0)
+                        is_extended_drop = True
+                        
                     drop_trigger = tracking_info['peak_price'] * (1 - (trailing_drop / 100.0))
                     
                     candle = await asyncio.to_thread(broker.get_current_5min_candle, t)
@@ -554,7 +579,8 @@ async def scheduled_sniper_monitor(context):
                             if is_vwap_death_cross and curr_p > drop_trigger:
                                 msg += f"▫️ 지지선 붕괴: 당일 VWAP(${c_vwap:.2f}) 데드크로스 포착 (조기 기습 익절 가동)\n\n"
                             else:
-                                msg += f"▫️ 하락폭 감지: 최고점 대비 -{trailing_drop}% 꺾임\n\n"
+                                ext_str = f" (Strong Up 추세장 {trailing_drop}% 확장 적용)" if is_extended_drop else ""
+                                msg += f"▫️ 하락폭 감지: 최고점 대비 -{trailing_drop}% 꺾임{ext_str}\n\n"
                                 
                             msg += f"🛡️ 익절은 무조건 정답이다!\n"
                             msg += f"기본 방어선(${base_trigger:.2f})이 뚫리기 전, 기존 LOC 주문을 취소하고 지정가 ${actual_sell_price:.2f}에 {q_qty}주를 가로채어 수익을 강제 확정했습니다. 🎯\n"
@@ -578,7 +604,7 @@ async def scheduled_sniper_monitor(context):
                             fail_history_q[t] = now_ts
                         
                         ma_5day = await asyncio.to_thread(broker.get_5day_ma, t)
-                        plan = strategy.get_plan(t, curr_p, avg_price, qty, prev_c, ma_5day=ma_5day, market_type="REG", available_cash=allocated_cash[t], is_simulation=True)
+                        plan = strategy.get_plan(t, curr_p, avg_price, qty, prev_c, ma_5day=ma_5day, market_type="REG", available_cash=allocated_cash[t], is_simulation=True, vwap_status=vwap_status)
                         
                         for o in plan.get('core_orders', []):
                             if o['side'] == 'SELL' and o['type'] == 'LOC':
@@ -741,6 +767,13 @@ async def scheduled_vwap_trade(context):
                 ma_5day = await asyncio.to_thread(broker.get_5day_ma, t)
                 if curr_p <= 0: continue
                 
+                # 💡 [V23.12 패치] 1분봉 데이터 스캔 및 VWAP 거래량 지배력 실시간 판별
+                try:
+                    df_1min = await asyncio.to_thread(broker.get_1min_candles_df, t)
+                    vwap_status = strategy.analyze_vwap_dominance(df_1min)
+                except Exception:
+                    vwap_status = {"vwap_price": 0.0, "is_strong_up": False, "is_strong_down": False}
+                
                 # 💡 오리지널 정규장 예산/수량 산출
                 plan = strategy.get_plan(
                     t, curr_p, actual_avg, actual_qty, prev_c, ma_5day=ma_5day,
@@ -800,26 +833,34 @@ async def scheduled_vwap_trade(context):
                     await asyncio.to_thread(broker.cancel_all_orders_safe, t, "BUY")
                     await asyncio.to_thread(broker.cancel_all_orders_safe, t, "SELL")
                     
-                    # 2. 💡 12% 잭팟(지정가 매도)만 정밀 재장전 (재계산 방지 캐시 데이터 사용)
+                    # 2. 💡 12% 잭팟(지정가 매도)만 단독 재장전
                     for o in vwap_cache.get(f"{t}_jackpot_orders", []):
                         broker.send_order(t, o['side'], o['qty'], o['price'], o['type'])
                         await asyncio.sleep(0.2)
                             
                     vwap_cache[f"{t}_cancelled"] = True
                     await asyncio.sleep(5.0) 
-                    cash, holdings = broker.get_account_balance() # 해방된 자금/주식 최종 갱신
+                    cash, holdings = broker.get_account_balance()
                 
-                # 💡 매수(BUY) VWAP 타임 슬라이싱 (상한선 방어막 필터링)
+                # 💡 [V23.12 패치] 2번 로직: 기관 쏠림 판별 및 매수 보류(Hold) 텔레그램 통보
+                if vwap_status.get('is_strong_up', False) and not vwap_cache.get(f"{t}_hold_alerted"):
+                    vwap_cache[f"{t}_hold_alerted"] = True
+                    msg = f"🛡️ <b>[{t}] VWAP 매수 보류 (Strong Up 필터 가동)</b>\n"
+                    msg += f"거래량 지배력이 당일 평균가 위에 집중된 강력한 상승 추세장입니다.\n"
+                    msg += f"FOMO(고점 불타기) 방지를 위해 남은 VWAP 매수 예산 집행을 전면 보류(Hold)하며, 하단 종가(LOC) 방어선만 온전히 유지합니다."
+                    await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
+
+                # 💡 매수(BUY) VWAP 타임 슬라이싱 (상한선 방어막 필터링 및 VWAP 상태 전파)
                 rem_star_budget = max(0.0, target_star_buy_budget - vwap_cache.get(f"{t}_star_buy_executed", 0.0))
                 rem_avg_budget = max(0.0, target_avg_buy_budget - vwap_cache.get(f"{t}_avg_buy_executed", 0.0))
                 
                 buy_qty = 0
                 if curr_p <= star_price and rem_star_budget > 0:
-                    p1 = vwap_strategy.get_vwap_plan(t, curr_p, rem_star_budget, side="BUY")
+                    p1 = vwap_strategy.get_vwap_plan(t, curr_p, rem_star_budget, side="BUY", vwap_status=vwap_status)
                     if p1['orders']: buy_qty += p1['orders'][0]['qty']
                     
                 if curr_p <= actual_avg and rem_avg_budget > 0:
-                    p2 = vwap_strategy.get_vwap_plan(t, curr_p, rem_avg_budget, side="BUY")
+                    p2 = vwap_strategy.get_vwap_plan(t, curr_p, rem_avg_budget, side="BUY", vwap_status=vwap_status)
                     if p2['orders']: buy_qty += p2['orders'][0]['qty']
                     
                 if buy_qty > 0:
@@ -829,10 +870,10 @@ async def scheduled_vwap_trade(context):
                     # 1호가로 재검증
                     valid_buy_qty = 0
                     if exec_price <= star_price and rem_star_budget > 0:
-                        p1 = vwap_strategy.get_vwap_plan(t, exec_price, rem_star_budget, side="BUY")
+                        p1 = vwap_strategy.get_vwap_plan(t, exec_price, rem_star_budget, side="BUY", vwap_status=vwap_status)
                         if p1['orders']: valid_buy_qty += p1['orders'][0]['qty']
                     if exec_price <= actual_avg and rem_avg_budget > 0:
-                        p2 = vwap_strategy.get_vwap_plan(t, exec_price, rem_avg_budget, side="BUY")
+                        p2 = vwap_strategy.get_vwap_plan(t, exec_price, rem_avg_budget, side="BUY", vwap_status=vwap_status)
                         if p2['orders']: valid_buy_qty += p2['orders'][0]['qty']
                         
                     if valid_buy_qty > 0:
@@ -875,7 +916,7 @@ async def scheduled_vwap_trade(context):
                 remaining_sell_qty = max(0, target_sell_qty - executed_sell_qty)
                 
                 if remaining_sell_qty > 0 and curr_p >= star_price:
-                    vwap_sell_plan = vwap_strategy.get_vwap_plan(t, curr_p, remaining_sell_qty, side="SELL")
+                    vwap_sell_plan = vwap_strategy.get_vwap_plan(t, curr_p, remaining_sell_qty, side="SELL", vwap_status=vwap_status)
                     
                     if vwap_sell_plan['orders']:
                         for o in vwap_sell_plan['orders']:
