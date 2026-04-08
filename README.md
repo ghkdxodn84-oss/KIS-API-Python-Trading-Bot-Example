@@ -41,7 +41,7 @@ python main.py.
 📁 strategy_reversion.py: V-REV 역추세 하이브리드 타점 산출 및 공수 스위칭 엔진.   
 📁 queue_ledger.py: V-REV 날짜 기반 지층 통합 LIFO 큐 데이터 비파괴 관리 모듈.   
 📁 vwap_strategy.py: 장 마감 30분 전 자율주행 유동성 분할 및 1호가 정밀 타격 엔진.   
-📁 volatility_engine.py: 1년 ATR 평균 및 VXN/HV 기반 시장 변동성 마스터 스위치 연산 모듈.
+📁 volatility_engine.py: 1년 ATR 평균 및 VXN/HV 기반 시장 변동성 마스터 스위치 연산 모듈.   
 📁 broker.py: 한국투자증권 API 통신 및 야후 파이낸스 데이터(데드락 방어 적용) 가공 클래스.   
 📁 strategy.py: 일반 무매(V14/V17) 예산 분배 및 목표가 산출 알고리즘 클래스.   
 📁 telegram_bot.py / telegram_view.py: 텔레그램 봇 컨트롤러(삼위일체 소각 엔진 탑재) 및 통합 지시서 대시보드 화면 렌더링 로직.   
