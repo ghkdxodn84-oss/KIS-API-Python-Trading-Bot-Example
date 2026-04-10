@@ -5,6 +5,7 @@
 # 2. 0주 도달 시 마이너스 수익이라도 장부를 비우는(강제 손절 리셋) 로직 개방
 # 💡 [V24.18 하이브리드] AVWAP 하이브리드 토글(ON/OFF) 2단계 경고 라우터 융합
 # 🚨 [V25.01 UI 교정] /sync 지시서 내 AVWAP 잉여 예산 표기 오류 수정 (팩트 동기화)
+# 🚨 [V25.02 스냅샷 패치] V-REV 0주 스윕 시 장부 소각 전 메모리 스냅샷 캡처 및 졸업카드 렌더링 연결
 # ==========================================================
 import logging
 import datetime
@@ -377,8 +378,6 @@ class TelegramController:
                         avwap_qty = tracking_cache.get(f"AVWAP_QTY_{t}", 0)
                         avwap_avg = tracking_cache.get(f"AVWAP_AVG_{t}", 0.0)
                         
-                        # 🚨 [UI 교정] AVWAP 엔진은 KIS가 반환한 '실시간 주문가능금액' 전체를 기동 예산으로 사용
-                        # 기존의 인위적 가상 차감 로직을 제거하여 팩트 동기화
                         avwap_budget = cash
                         
                         if tracking_cache.get(f"AVWAP_SHUTDOWN_{t}"):
@@ -522,9 +521,41 @@ class TelegramController:
                     ledger_qty = sum(int(float(item.get("qty") or 0)) for item in q_data_before)
                     
                     if actual_qty == 0 and ledger_qty > 0:
+                        # NEW: [스냅샷 패치] 장부 소각 전 실현 수익 및 평단가 캡처 로직 신설
+                        try:
+                            total_invested = sum(float(item.get("qty", 0)) * float(item.get("price", 0)) for item in q_data_before)
+                            q_avg_price = total_invested / ledger_qty if ledger_qty > 0 else 0.0
+                            
+                            curr_p = await asyncio.to_thread(self.broker.get_current_price, ticker)
+                            clear_price = curr_p if curr_p and curr_p > 0 else q_avg_price * 1.006 
+                            
+                            snapshot = self.strategy.capture_vrev_snapshot(ticker, clear_price, q_avg_price, ledger_qty)
+                        except Exception as e:
+                            logging.error(f"스냅샷 캡처 중 오류: {e}")
+                            snapshot = None
+                            
                         self.queue_ledger.sync_with_broker(ticker, 0)
+                        
                         msg = f"🎉 <b>[{ticker} V-REV 잭팟 스윕(전량 익절) 감지!]</b>\n▫️ 잔고가 0주가 되어 LIFO 큐 지층을 100% 소각(초기화)했습니다."
                         await context.bot.send_message(chat_id, msg, parse_mode='HTML')
+                        
+                        # NEW: [스냅샷 패치] 캡처된 스냅샷으로 졸업 카드 렌더링 및 발송 연결
+                        if snapshot:
+                            try:
+                                img_path = self.view.create_profit_image(
+                                    ticker=ticker, 
+                                    profit=snapshot['realized_pnl'], 
+                                    yield_pct=snapshot['realized_pnl_pct'],
+                                    invested=snapshot['avg_price'] * snapshot['cleared_qty'], 
+                                    revenue=snapshot['clear_price'] * snapshot['cleared_qty'], 
+                                    end_date=snapshot['captured_at'].strftime('%Y-%m-%d')
+                                )
+                                if os.path.exists(img_path):
+                                    with open(img_path, 'rb') as photo:
+                                        await context.bot.send_photo(chat_id=chat_id, photo=photo)
+                            except Exception as e:
+                                logging.error(f"📸 V-REV 스냅샷 이미지 렌더링/발송 실패: {e}")
+                                
                         self._sync_escrow_cash(ticker)
                         return "SUCCESS"
                         

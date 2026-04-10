@@ -108,14 +108,36 @@ class InfiniteStrategy:
             vwap_status=vwap_status
         )
 
+    # NEW: [메모리 스냅샷 패치] 0주 소각 전 실현 수익 보존을 위한 캡처 인터페이스
+    def capture_vrev_snapshot(self, ticker, clear_price, avg_price, qty):
+        """
+        장부(Ledger) 및 LIFO 큐가 소각되기 직전에 호출되어 졸업 카드 렌더링을 위한 실현 수익 데이터를 캡처합니다.
+        """
+        if qty <= 0:
+            return None
+            
+        realized_pnl = (clear_price - avg_price) * qty
+        realized_pnl_pct = ((clear_price - avg_price) / avg_price) * 100 if avg_price > 0 else 0.0
+        
+        return {
+            "ticker": ticker,
+            "clear_price": clear_price,
+            "avg_price": avg_price,
+            "cleared_qty": qty,
+            "realized_pnl": realized_pnl,
+            "realized_pnl_pct": realized_pnl_pct,
+            "captured_at": pd.Timestamp.now(tz='Asia/Seoul')
+        }
+
     # ==========================================================
     # ⚔️ 하이브리드 AVWAP 플러그인 전용 인터페이스 개방
     # ==========================================================
-    def fetch_avwap_macro(self, ticker):
-        return self.v_avwap_plugin.fetch_macro_context(ticker)
+    # MODIFIED: [듀얼 레퍼런싱 연계] 파생상품(SOXL) 대신 기초자산(SOXX) 종목코드 수신용 파라미터 변경
+    def fetch_avwap_macro(self, base_ticker):
+        return self.v_avwap_plugin.fetch_macro_context(base_ticker)
 
-    def get_avwap_decision(self, ticker, curr_p, day_open, avg_price, qty, alloc_cash, context_data, df_1min, now_est):
+    # MODIFIED: [듀얼 레퍼런싱 연계] 기초자산과 파생상품의 이원화된 가격/종목코드 라우팅
+    def get_avwap_decision(self, base_ticker, exec_ticker, base_curr_p, exec_curr_p, base_day_open, avg_price, qty, alloc_cash, context_data, df_1min_base, now_est):
         return self.v_avwap_plugin.get_decision(
-            ticker, curr_p, day_open, avg_price, qty, alloc_cash, context_data, df_1min, now_est
+            base_ticker, exec_ticker, base_curr_p, exec_curr_p, base_day_open, avg_price, qty, alloc_cash, context_data, df_1min_base, now_est
         )
-

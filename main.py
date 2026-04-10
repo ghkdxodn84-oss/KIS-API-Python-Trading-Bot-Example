@@ -4,7 +4,7 @@
 # 💡 [V24.10] 텔레그램 API 통신 타임아웃(TimedOut) 방어 및 커넥션 풀 최적화 이식 완료
 # 💡 [V24.11 수술] VolatilityEngine 동적 연결 및 TelegramController 의존성 주입
 # 💡 [V24.15 대수술] V_VWAP 플러그인 의존성 100% 영구 적출 및 2대 코어 체제 확립
-# 💡 [V24.17 수술] 긴급 수혈(Emergency MOC) 자동 스케줄러 영구 적출 (수동 격발로 전환)
+# 💡 [V24.20 패치] 듀얼 레퍼런싱(SOXX/SOXL) 인프라 및 스냅샷 파이프라인 증설
 # ==========================================================
 
 import os
@@ -23,7 +23,7 @@ from telegram_bot import TelegramController
 # 💡 [V_REV 신규 역추세 엔진 의존성 주입]
 from queue_ledger import QueueLedger
 from strategy_reversion import ReversionStrategy
-from volatility_engine import VolatilityEngine  # 💡 [핵심 수술] 하드코딩 제거를 위한 변동성 엔진 임포트
+from volatility_engine import VolatilityEngine
 
 # 💡 [핵심 수술] 분할된 2개의 스케줄러 파일에서 각각 역할에 맞게 함수를 임포트
 from scheduler_core import (
@@ -42,6 +42,16 @@ from scheduler_trade import (
     scheduled_vwap_init_and_cancel,  
     scheduled_after_market_lottery  
 )
+
+# NEW: [듀얼 레퍼런싱] 기초자산(Base)과 파생상품(Exec) 간의 1:1 매핑 딕셔너리 정의
+# (펀더멘털 시그널 스캔을 위한 듀얼 레퍼런싱 앵커 맵)
+TICKER_BASE_MAP = {
+    "SOXL": "SOXX",
+    "TQQQ": "QQQ",
+    "TSLL": "TSLA",
+    "FNGU": "FNGS",
+    "BULZ": "FNGS"
+}
 
 if not os.path.exists('data'):
     os.makedirs('data')
@@ -85,6 +95,8 @@ async def scheduled_volatility_scan(context):
     """
     app_data = context.job.data
     cfg = app_data['cfg']
+    # MODIFIED: 듀얼 레퍼런싱 매핑 데이터 로드
+    base_map = app_data.get('base_map', TICKER_BASE_MAP)
     
     print("\n" + "=" * 60)
     print("📈 [자율주행 변동성 스캔 완료] (10:20 EST 스냅샷)")
@@ -99,23 +111,29 @@ async def scheduled_volatility_scan(context):
         print("📊 현재 운용 중인 종목이 없습니다.")
     else:
         briefing_lines = []
-        vol_engine = VolatilityEngine()  # 💡 [핵심 수술] 자율주행 엔진 인스턴스화
+        vol_engine = VolatilityEngine()
         
         for ticker in active_tickers:
+            # MODIFIED: 기초자산 매핑 확인 (없으면 본인 사용)
+            target_base = base_map.get(ticker, ticker)
             try:
-                # 💡 [핵심 수술] 기존 하드코딩(0.85/1.15)을 완벽히 도려내고 실시간 변동성 지표 동적 스캔
-                weight_data = await asyncio.to_thread(vol_engine.calculate_weight, ticker)
+                # 💡 [핵심 수술] 계산은 파생상품 노이즈가 배제된 기초자산(SOXX 등) 기준으로 수행
+                weight_data = await asyncio.to_thread(vol_engine.calculate_weight, target_base)
                 real_weight = float(weight_data.get('weight', 1.0) if isinstance(weight_data, dict) else weight_data)
             except Exception as e:
                 logging.warning(f"[{ticker}] 변동성 지표 산출 실패. 폴백(Fallback) 안전마진 적용: {e}")
                 real_weight = 0.85 if ticker == "TQQQ" else 1.15 
                 
             status_text = "OFF 권장" if real_weight <= 1.0 else "ON 권장"
-            briefing_lines.append(f"{ticker}: {real_weight:.2f} ({status_text})")
+            # MODIFIED: 브리핑 시 기초자산 병기
+            if ticker != target_base:
+                briefing_lines.append(f"{ticker}({target_base}): {real_weight:.2f} ({status_text})")
+            else:
+                briefing_lines.append(f"{ticker}: {real_weight:.2f} ({status_text})")
             
         print(f"📊 [자율주행 지표] {' | '.join(briefing_lines)} (상세 게이지: /mode)")
     print("=" * 60 + "\n")
-# ==========================================================
+
 def main():
     TARGET_HOUR, season_msg = get_target_hour()
     
@@ -136,14 +154,11 @@ def main():
     broker = KoreaInvestmentBroker(APP_KEY, APP_SECRET, CANO, ACNT_PRDT_CD)
     strategy = InfiniteStrategy(cfg)
     
-    # 💡 [V_REV] 독립 모듈 객체 초기화
     queue_ledger = QueueLedger()
     strategy_rev = ReversionStrategy()
     
     tx_lock = asyncio.Lock()
     
-    # 💡 [핵심 수술] TelegramController에 V-REV 필수 모듈(queue_ledger, strategy_rev) 완벽 주입
-    # (주의: telegram_bot.py 의 __init__ 인자 순서에 맞춰 kwargs로 안전하게 주입합니다)
     bot = TelegramController(
         cfg, 
         broker, 
@@ -153,7 +168,6 @@ def main():
         strategy_rev=strategy_rev
     )
     
-    # 💡 [핵심 수술] 텔레그램 네트워크 지연(Timeout) 방어 및 커넥션 풀 확장
     app = (
         Application.builder()
         .token(TELEGRAM_TOKEN)
@@ -165,7 +179,6 @@ def main():
         .build()
     )
     
-    # 💡 [V24.14 프론트엔드 다이어트] v17, v4 핸들러 완벽 소각
     for cmd, handler in [
         ("start", bot.cmd_start), 
         ("record", bot.cmd_record), 
@@ -185,6 +198,7 @@ def main():
     
     if cfg.get_chat_id():
         jq = app.job_queue
+        # MODIFIED: app_data에 base_map 주입 (전략/스케줄러/봇 전역 공유)
         app_data = {
             'cfg': cfg, 
             'broker': broker, 
@@ -192,7 +206,8 @@ def main():
             'queue_ledger': queue_ledger,  
             'strategy_rev': strategy_rev,  
             'bot': bot, 
-            'tx_lock': tx_lock
+            'tx_lock': tx_lock,
+            'base_map': TICKER_BASE_MAP
         }
         kst = pytz.timezone('Asia/Seoul')
         est = pytz.timezone('US/Eastern')
@@ -210,25 +225,19 @@ def main():
         jq.run_daily(scheduled_volatility_scan, time=datetime.time(10, 20, tzinfo=est), days=(0,1,2,3,4), chat_id=cfg.get_chat_id(), data=app_data)
         
         # 2. 실전 전투 매매 스케줄러 (trade)
-        # 💡 [Phase 1] 프리장(17:05 KST)에 '선제적 양방향 LOC 덫' 사전 전송 (블랙스완/서버다운 대비)
         for hour in [17, 18]:
             jq.run_daily(scheduled_regular_trade, time=datetime.time(hour, 5, tzinfo=kst), days=(0,1,2,3,4), chat_id=cfg.get_chat_id(), data=app_data)
         
-        # 💡 [Phase 2] 장 후반 15:30 EST (04:30 KST) 기상: 사전 LOC 전량 취소 후 1분봉 타격 준비 (V-REV 전용)
         jq.run_daily(scheduled_vwap_init_and_cancel, time=datetime.time(15, 30, tzinfo=est), days=(0,1,2,3,4), chat_id=cfg.get_chat_id(), data=app_data)
 
-        # 💡 스나이퍼 감시 및 V-REV 슬라이싱 (60초 간격 무한 반복 - 내부에서 15:30 EST 이후에만 작동하도록 통제됨)
         jq.run_repeating(scheduled_sniper_monitor, interval=60, chat_id=cfg.get_chat_id(), data=app_data)
         jq.run_repeating(scheduled_vwap_trade, interval=60, chat_id=cfg.get_chat_id(), data=app_data)
         
-        # 💡 [Phase 3] 애프터마켓 로터리 덫 (16:05 EST)
         jq.run_daily(scheduled_after_market_lottery, time=datetime.time(16, 5, tzinfo=est), days=(0,1,2,3,4), chat_id=cfg.get_chat_id(), data=app_data)
 
-        # 3. 자정 청소 (core)
         jq.run_daily(scheduled_self_cleaning, time=datetime.time(6, 0, tzinfo=kst), days=tuple(range(7)), chat_id=cfg.get_chat_id(), data=app_data)
         
     app.run_polling()
 
 if __name__ == "__main__":
     main()
-
