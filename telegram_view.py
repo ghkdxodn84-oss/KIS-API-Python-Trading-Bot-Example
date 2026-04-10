@@ -254,6 +254,7 @@ class TelegramView:
 # 💡 [V24.15 대수술] 2대 코어(V14, V-REV) 체제 UI 최적화 및 V_VWAP 적출
 # 💡 [V24.18 하이브리드] V-REV 종속형 AVWAP 투트랙(Two-track) 지시서 표출 로직 융합
 # 💡 [긴급 수술] V-REV 예방적 방어선 수동 장전 버튼(EXEC) UI 100% 복원
+# 🚨 [V25.09 렌더링 패치] V-REV 지시서 하단에 덧붙여지던 V14 찌꺼기(🧹 줍줍, 0.975) 강제 출력 블록 영구 소각
 # ==========================================================
 
     def create_sync_report(self, status_text, dst_text, cash, rp_amount, ticker_data, is_trade_active, p_trade_data=None):
@@ -382,39 +383,12 @@ class TelegramView:
             if v_mode == "V_REV":
                 body_msg += f"📋 <b>[주문 가이던스 - ⚖️다중 LIFO 제어]</b>\n"
                 
-                qty = t_info.get('qty', 0)
-                alloc_cash = t_info.get('one_portion', 0.0)
-                prev_c = t_info.get('prev_close', 0.0)
-                
-                if qty == 0 and alloc_cash > 0 and prev_c > 0:
-                    p1_trigger = round(prev_c * 1.15, 2)
-                    p2_trigger = round(prev_c * 0.975, 2)
-                    b1_budget = alloc_cash * 0.5
-                    b2_budget = alloc_cash * 0.5
-                    
-                    q1 = math.floor(b1_budget / p1_trigger) if p1_trigger > 0 else 0
-                    q2 = math.floor(b2_budget / p2_trigger) if p2_trigger > 0 else 0
-                    
-                    body_msg += f" 🔵 매도(Pop): 대기 물량 없음 (관망)\n"
-                    body_msg += f" 🔴 매수1(Buy1): <b>${p1_trigger:.2f}</b> 진입 시 {q1}주\n"
-                    body_msg += f" 🔴 매수2(Buy2): <b>${p2_trigger:.2f}</b> 진입 시 {q2}주\n"
-                else:
-                    raw_guidance = t_info.get('v_rev_guidance', " (가이던스 대기 중)")
-                    raw_guidance = raw_guidance.rstrip('\n')
-                    body_msg += raw_guidance + "\n"
-                
-                if alloc_cash > 0 and prev_c > 0:
-                    p2_trigger = round(prev_c * 0.975, 2)
-                    if p2_trigger > 0:
-                        b2_budget = alloc_cash * 0.5
-                        q2 = math.floor(b2_budget / p2_trigger)
-                        
-                        grid_start = round(b2_budget / (q2 + 1), 2)
-                        grid_end = round(b2_budget / (q2 + 5), 2)
-                        
-                        if grid_start >= 0.01 and grid_start < p2_trigger:
-                            grid_end = max(grid_end, 0.01)
-                            body_msg += f" 🧹 줍줍(5개): <b>${grid_start:.2f} ~ ${grid_end:.2f} (LOC)</b>\n"
+                # MODIFIED: [V25.09 렌더링 패치] 텔레그램 뷰어(UI) 내부에서 하드코딩으로 연산해서 덧붙이던
+                # 1.15 / 0.975 구버전 수동 디커플링 로직 및 🧹줍줍 블록을 100% 영구 소각(Nuke)했습니다.
+                # 오직 telegram_bot.py 가 정밀 역산하여 던져준 v_rev_guidance 텍스트만 순수하게 투영합니다.
+                raw_guidance = t_info.get('v_rev_guidance', " (가이던스 대기 중)")
+                raw_guidance = raw_guidance.rstrip('\n')
+                body_msg += raw_guidance + "\n"
 
                 # 💡 [V24.18 하이브리드] V-REV 모드일 때 AVWAP 켜져있으면 투트랙(Two-track) 지시서 독립 표출
                 if t_info.get('avwap_active', False):

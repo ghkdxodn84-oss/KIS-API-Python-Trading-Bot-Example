@@ -6,6 +6,8 @@
 # 💡 [V24.18 하이브리드] AVWAP 하이브리드 토글(ON/OFF) 2단계 경고 라우터 융합
 # 🚨 [V25.01 UI 교정] /sync 지시서 내 AVWAP 잉여 예산 표기 오류 수정 (팩트 동기화)
 # 🚨 [V25.02 스냅샷 패치] V-REV 0주 스윕 시 장부 소각 전 메모리 스냅샷 캡처 및 졸업카드 렌더링 연결
+# 🚨 [V25.06 롤오버 및 복리 패치] 장외 시간 타점 왜곡 방어(YF 치환) 및 V-REV 스윕 익절 복리(Seed) 100% 자동 증식 이식
+# 🚨 [V25.07 수학적 교정] 구버전 승수 잔재 완전 철거 및 최신 디커플링 공식(0.999 및 ÷0.935) 팩트 주입
 # ==========================================================
 import logging
 import datetime
@@ -15,6 +17,7 @@ import os
 import math 
 import asyncio
 import json
+import yfinance as yf
 import pandas_market_calendars as mcal 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler, MessageHandler, filters
@@ -294,6 +297,18 @@ class TelegramController:
                 actual_qty = int(h['qty'])
                 
                 safe_prev_close = prev_close if prev_close else 0.0
+                
+                if status_code in ["AFTER", "CLOSE", "PRE"]:
+                    try:
+                        def get_yf_close():
+                            df = yf.Ticker(t).history(period="5d", interval="1d")
+                            return float(df['Close'].iloc[-1]) if not df.empty else None
+                        yf_close = await asyncio.wait_for(asyncio.to_thread(get_yf_close), timeout=3.0)
+                        if yf_close and yf_close > 0:
+                            safe_prev_close = yf_close
+                    except Exception as e:
+                        logging.debug(f"YF 정규장 종가 롤오버 스캔 실패 ({t}): {e}")
+
                 idx_ticker = "SOXX" if t == "SOXL" else "QQQ"
                 dynamic_pct_obj = await asyncio.to_thread(self.broker.get_dynamic_sniper_target, idx_ticker)
                 dynamic_pct = float(dynamic_pct_obj) if dynamic_pct_obj is not None else (8.79 if t == "SOXL" else 4.95)
@@ -364,6 +379,7 @@ class TelegramController:
                     else:
                         v_rev_guidance += f" 🔵 매도(Pop): 대기 물량 없음 (관망)\n"
                     
+                    # 🚨 MODIFIED: [수학적 교정] 1.15 및 0.975 잔재를 0.999 및 /0.935 팩트로 완벽 덮어쓰기
                     b1_price = round(safe_prev_close * 0.999 if v_rev_q_qty == 0 else safe_prev_close * 0.995, 2)
                     b2_price = round(safe_prev_close / 0.935 if v_rev_q_qty == 0 else safe_prev_close * 0.9725, 2)
                     
@@ -521,7 +537,7 @@ class TelegramController:
                     ledger_qty = sum(int(float(item.get("qty") or 0)) for item in q_data_before)
                     
                     if actual_qty == 0 and ledger_qty > 0:
-                        # NEW: [스냅샷 패치] 장부 소각 전 실현 수익 및 평단가 캡처 로직 신설
+                        added_seed = 0.0
                         try:
                             total_invested = sum(float(item.get("qty", 0)) * float(item.get("price", 0)) for item in q_data_before)
                             q_avg_price = total_invested / ledger_qty if ledger_qty > 0 else 0.0
@@ -530,16 +546,43 @@ class TelegramController:
                             clear_price = curr_p if curr_p and curr_p > 0 else q_avg_price * 1.006 
                             
                             snapshot = self.strategy.capture_vrev_snapshot(ticker, clear_price, q_avg_price, ledger_qty)
+                            
+                            if snapshot:
+                                realized_pnl = snapshot['realized_pnl']
+                                yield_pct = snapshot['realized_pnl_pct']
+                                
+                                compound_rate = float(self.cfg.get_compound_rate(ticker)) / 100.0
+                                if realized_pnl > 0 and compound_rate > 0:
+                                    added_seed = realized_pnl * compound_rate
+                                    current_seed = self.cfg.get_seed(ticker)
+                                    self.cfg.set_seed(ticker, current_seed + added_seed)
+                                
+                                hist_data = self.cfg._load_json(self.cfg.FILES["HISTORY"], [])
+                                new_hist = {
+                                    "id": int(time.time()),
+                                    "ticker": ticker,
+                                    "start_date": q_data_before[-1]['date'][:10] if q_data_before else snapshot['captured_at'].strftime('%Y-%m-%d'),
+                                    "end_date": snapshot['captured_at'].strftime('%Y-%m-%d'),
+                                    "invested": total_invested,
+                                    "revenue": total_invested + realized_pnl,
+                                    "profit": realized_pnl,
+                                    "yield": yield_pct,
+                                    "trades": q_data_before 
+                                }
+                                hist_data.append(new_hist)
+                                self.cfg._save_json(self.cfg.FILES["HISTORY"], hist_data)
+                                
                         except Exception as e:
-                            logging.error(f"스냅샷 캡처 중 오류: {e}")
+                            logging.error(f"스냅샷 캡처 및 복리 정산 중 오류: {e}")
                             snapshot = None
                             
                         self.queue_ledger.sync_with_broker(ticker, 0)
                         
                         msg = f"🎉 <b>[{ticker} V-REV 잭팟 스윕(전량 익절) 감지!]</b>\n▫️ 잔고가 0주가 되어 LIFO 큐 지층을 100% 소각(초기화)했습니다."
+                        if added_seed > 0:
+                            msg += f"\n💸 <b>자동 복리 +${added_seed:,.0f}</b> 이 다음 운용 시드에 완벽하게 추가되었습니다!"
                         await context.bot.send_message(chat_id, msg, parse_mode='HTML')
                         
-                        # NEW: [스냅샷 패치] 캡처된 스냅샷으로 졸업 카드 렌더링 및 발송 연결
                         if snapshot:
                             try:
                                 img_path = self.view.create_profit_image(
@@ -743,6 +786,8 @@ class TelegramController:
 # 💡 [V24.18 수술] 수동 긴급 수혈(Emergency MOC) 장외시간 사전 차단 및 MOC 격발 엔진 신설
 # 💡 [V24.18 하이브리드] AVWAP 하이브리드 토글(ON/OFF/WARN) 2단계 경고 라우터 융합 완료
 # 🚨 [긴급 수술] V-REV 예방적 LOC 덫 수동 장전 라우터(EXEC) 완벽 분리 이식
+# 🚨 [V25.06 롤오버 패치] 수동 EXEC 시 장외시간 낡은 전일종가(T-2)를 최신 현재가(T-1)로 치환(Overwrite)하여 타점 불일치 해결
+# 🚨 [V25.07 수학적 교정] 구버전 승수 잔재 완전 철거 및 최신 디커플링 공식(0.999 및 /0.935) 팩트 주입
 # ==========================================================
 
     async def cmd_history(self, update, context):
@@ -1147,6 +1192,11 @@ class TelegramController:
                 safe_avg = float(h.get('avg') or 0.0)
                 safe_qty = int(float(h.get('qty') or 0))
 
+                # NEW: [V25.06 롤오버 패치] 수동 전송 시 장외 시간일 경우 전일 종가를 최신 현재가로 치환하여 타점 왜곡 방지
+                status_code, _ = self._get_market_status()
+                if status_code in ["AFTER", "CLOSE", "PRE"] and curr_p > 0:
+                    prev_c = curr_p
+
                 if ver == "V_REV":
                     if not getattr(self, 'queue_ledger', None):
                         from queue_ledger import QueueLedger
@@ -1169,6 +1219,7 @@ class TelegramController:
                             if sell_qty > 0:
                                 loc_orders.append({'side': 'SELL', 'qty': sell_qty, 'price': target_sell_price, 'type': 'LOC', 'desc': f'예방적 매도(Pop{idx+1})'})
                     
+                    # 🚨 MODIFIED: [V25.07 수학적 교정] 1.15 및 0.975 잔재를 0.999 및 /0.935 팩트로 완벽 덮어쓰기
                     if prev_c > 0:
                         b1_price = round(prev_c * 0.999 if v_rev_q_qty == 0 else prev_c * 0.995, 2)
                         b2_price = round(prev_c / 0.935 if v_rev_q_qty == 0 else prev_c * 0.9725, 2)

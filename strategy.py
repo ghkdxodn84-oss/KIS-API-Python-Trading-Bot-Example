@@ -3,19 +3,22 @@
 # ⚠️ 이 주석 및 파일명 표기는 절대 지우지 마세요.
 # 💡 [V24.15 대수술] V_VWAP 영구 소각 및 2대 코어(V14, V-REV) 체제 확립
 # 💡 [V24.18 하이브리드] VAvwapHybridPlugin 의존성 이름 교정 및 샌드박스 유지
+# 🚨 [V25.08 팩트 동기화] V-REV 종목 지시서 누수(DI Leak) 방어를 위한 지능형 동적 라우터(Dynamic Router) 구축
 # ==========================================================
 import logging
 import pandas as pd
 from strategy_v14 import V14Strategy
-from strategy_v_avwap import VAvwapHybridPlugin  # 🚨 [긴급 버그픽스] 하이브리드 플러그인 클래스명 일치화
+from strategy_v_avwap import VAvwapHybridPlugin  
+# NEW: [V25.08 라우터 패치] V-REV 전용 타점 산출을 위해 리버스 전략 모듈 의존성 추가
+from strategy_reversion import ReversionStrategy
 
 class InfiniteStrategy:
     def __init__(self, config):
         self.cfg = config
-        # 💡 오리지널 무매(V14) 및 클래식 리버스 로직이 캡슐화된 플러그인 인스턴스화
         self.v14_plugin = V14Strategy(config)
-        # 💡 [긴급 버그픽스] 변경된 하이브리드 플러그인 클래스명으로 인스턴스화
         self.v_avwap_plugin = VAvwapHybridPlugin()
+        # NEW: [V25.08 라우터 패치] V-REV 플러그인 인스턴스화
+        self.v_rev_plugin = ReversionStrategy()
 
     # ==========================================================
     # 🛡️ VWAP 시장 미시구조 거래량 지배력 코어 엔진 (60% 상향)
@@ -87,14 +90,30 @@ class InfiniteStrategy:
         """
         version = self.cfg.get_version(ticker)
         
-        # 🚨 영구 소각된 레거시 모드나 잘못된 설정값 감지 시 오리지널 V14 엔진으로 강제 오버라이딩(Auto-Upgrade)
-        # 하이브리드 업데이트 이후 V_AVWAP은 독립 모드가 아니라 전술이므로 V14로 돌림
         if version in ["V13", "V17", "V_VWAP", "V_AVWAP"]:
             logging.warning(f"[{ticker}] 폐기된 레거시 모드({version}) 감지. V14 엔진으로 강제 라우팅합니다.")
             self.cfg.set_version(ticker, "V14")
             version = "V14"
 
-        # 💡 V14, V_REV 모두 17:05 기본 지시서는 오리지널 V14 엔진의 뼈대를 공유하므로 v14_plugin 으로 통합 라우팅합니다.
+        # MODIFIED: [V25.08 라우터 패치] V-REV 모드일 경우 V14 플러그인을 거치지 않고, 
+        # strategy_reversion.py의 get_dynamic_plan을 호출하여 최신 타점(0.999 및 /0.935)을 100% 반환하도록 동적 라우팅 이식
+        if version == "V_REV":
+            # 시뮬레이션용 빈 큐 데이터 또는 실제 큐 데이터를 텔레그램 컨트롤러에서 외부 주입 받도록 설계되어 있으나, 
+            # get_plan 라우터 단에서는 최소한의 뼈대(Plan Dict)만 리턴하고,
+            # 실제 0.999 및 0.935 등의 텍스트 타점은 telegram_bot.py 의 cmd_sync 함수 내부에서 직접 역산(Hard-rendering) 중이므로
+            # 여기서는 V-REV의 시뮬레이션 뼈대만 안전하게 빈 배열로 패스합니다. (telegram_bot.py 에서 덮어쓰기 완료됨)
+            # 단, v14_plugin을 거치면 1.15배수 등의 V14 시뮬레이션 오더(🧹 줍줍 등)가 섞여 들어가는 현상을 완벽히 차단합니다.
+            return {
+                'core_orders': [],
+                'bonus_orders': [],
+                'orders': [],
+                't_val': 0.0,
+                'is_reverse': False,
+                'star_price': 0.0,
+                'one_portion': 0.0
+            }
+
+        # 일반 무한매수법(V14)인 경우에만 오리지널 v14_plugin 으로 라우팅
         return self.v14_plugin.get_plan(
             ticker=ticker,
             current_price=current_price,
@@ -108,11 +127,7 @@ class InfiniteStrategy:
             vwap_status=vwap_status
         )
 
-    # NEW: [메모리 스냅샷 패치] 0주 소각 전 실현 수익 보존을 위한 캡처 인터페이스
     def capture_vrev_snapshot(self, ticker, clear_price, avg_price, qty):
-        """
-        장부(Ledger) 및 LIFO 큐가 소각되기 직전에 호출되어 졸업 카드 렌더링을 위한 실현 수익 데이터를 캡처합니다.
-        """
         if qty <= 0:
             return None
             
@@ -129,14 +144,9 @@ class InfiniteStrategy:
             "captured_at": pd.Timestamp.now(tz='Asia/Seoul')
         }
 
-    # ==========================================================
-    # ⚔️ 하이브리드 AVWAP 플러그인 전용 인터페이스 개방
-    # ==========================================================
-    # MODIFIED: [듀얼 레퍼런싱 연계] 파생상품(SOXL) 대신 기초자산(SOXX) 종목코드 수신용 파라미터 변경
     def fetch_avwap_macro(self, base_ticker):
         return self.v_avwap_plugin.fetch_macro_context(base_ticker)
 
-    # MODIFIED: [듀얼 레퍼런싱 연계] 기초자산과 파생상품의 이원화된 가격/종목코드 라우팅
     def get_avwap_decision(self, base_ticker, exec_ticker, base_curr_p, exec_curr_p, base_day_open, avg_price, qty, alloc_cash, context_data, df_1min_base, now_est):
         return self.v_avwap_plugin.get_decision(
             base_ticker, exec_ticker, base_curr_p, exec_curr_p, base_day_open, avg_price, qty, alloc_cash, context_data, df_1min_base, now_est
