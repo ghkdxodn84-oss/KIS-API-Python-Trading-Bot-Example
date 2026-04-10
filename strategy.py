@@ -1,18 +1,21 @@
 # ==========================================================
-# [strategy.py] - 🌟 2대 코어 통합 완성본 🌟
+# [strategy.py] - 🌟 2대 코어 + 하이브리드 라우터 완성본 🌟
 # ⚠️ 이 주석 및 파일명 표기는 절대 지우지 마세요.
 # 💡 [V24.15 대수술] V_VWAP 영구 소각 및 2대 코어(V14, V-REV) 체제 확립
-# 💡 [핵심 수술] 폐기된 V_VWAP 감지 시 V14로 강제 오버라이딩(Auto-Upgrade)
+# 💡 [V24.18 하이브리드] VAvwapHybridPlugin 의존성 이름 교정 및 샌드박스 유지
 # ==========================================================
 import logging
 import pandas as pd
 from strategy_v14 import V14Strategy
+from strategy_v_avwap import VAvwapHybridPlugin  # 🚨 [긴급 버그픽스] 하이브리드 플러그인 클래스명 일치화
 
 class InfiniteStrategy:
     def __init__(self, config):
         self.cfg = config
         # 💡 오리지널 무매(V14) 및 클래식 리버스 로직이 캡슐화된 플러그인 인스턴스화
         self.v14_plugin = V14Strategy(config)
+        # 💡 [긴급 버그픽스] 변경된 하이브리드 플러그인 클래스명으로 인스턴스화
+        self.v_avwap_plugin = VAvwapHybridPlugin()
 
     # ==========================================================
     # 🛡️ VWAP 시장 미시구조 거래량 지배력 코어 엔진 (60% 상향)
@@ -80,18 +83,18 @@ class InfiniteStrategy:
         """
         [중앙 라우터]
         모든 종목의 통합 지시서(/sync) 및 정규장 17:05 선제적 주문서(Plan) 생성을 
-        strategy_v14.py 플러그인으로 위임합니다.
+        대상 코어 플러그인으로 위임하거나 격리(Bypass)합니다.
         """
         version = self.cfg.get_version(ticker)
         
-        # 🚨 영구 소각된 레거시 모드 감지 시 오리지널 V14 엔진으로 강제 오버라이딩(Auto-Upgrade)
-        if version in ["V13", "V17", "V_VWAP"]:
+        # 🚨 영구 소각된 레거시 모드나 잘못된 설정값 감지 시 오리지널 V14 엔진으로 강제 오버라이딩(Auto-Upgrade)
+        # 하이브리드 업데이트 이후 V_AVWAP은 독립 모드가 아니라 전술이므로 V14로 돌림
+        if version in ["V13", "V17", "V_VWAP", "V_AVWAP"]:
             logging.warning(f"[{ticker}] 폐기된 레거시 모드({version}) 감지. V14 엔진으로 강제 라우팅합니다.")
             self.cfg.set_version(ticker, "V14")
             version = "V14"
 
-        # 💡 V14, V_REV 모두 17:05 기본 지시서(Fail-Safe LOC 등)는 
-        # 오리지널 V14 엔진의 뼈대를 공유하므로 v14_plugin 으로 통합 라우팅합니다.
+        # 💡 V14, V_REV 모두 17:05 기본 지시서는 오리지널 V14 엔진의 뼈대를 공유하므로 v14_plugin 으로 통합 라우팅합니다.
         return self.v14_plugin.get_plan(
             ticker=ticker,
             current_price=current_price,
@@ -104,3 +107,15 @@ class InfiniteStrategy:
             is_simulation=is_simulation,
             vwap_status=vwap_status
         )
+
+    # ==========================================================
+    # ⚔️ 하이브리드 AVWAP 플러그인 전용 인터페이스 개방
+    # ==========================================================
+    def fetch_avwap_macro(self, ticker):
+        return self.v_avwap_plugin.fetch_macro_context(ticker)
+
+    def get_avwap_decision(self, ticker, curr_p, day_open, avg_price, qty, alloc_cash, context_data, df_1min, now_est):
+        return self.v_avwap_plugin.get_decision(
+            ticker, curr_p, day_open, avg_price, qty, alloc_cash, context_data, df_1min, now_est
+        )
+

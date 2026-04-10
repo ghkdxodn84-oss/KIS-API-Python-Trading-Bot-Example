@@ -3,6 +3,7 @@
 # ⚠️ V-REV 장부 강제 초기화 3중 경고 방어막 유지
 # 💡 [V24.15 대수술] 2대 코어(V14, V-REV) 체제 UI 최적화 및 V_VWAP 적출
 # 💡 [V24.18 수술] V-REV 큐 관리 메뉴 내 수동 긴급 수혈 3중 경고 방어막 UI 탑재
+# 💡 [V24.18 하이브리드] 차세대 AVWAP 가동 전 3대 리스크 강력 경고 팝업 UI 신설
 # ==========================================================
 import os
 import math
@@ -51,7 +52,7 @@ class TelegramView:
 
         return (
             f"🌌 <b>[ 인피니트 스노우볼 {latest_version} ]</b>\n" 
-            f"💠 <b> V-REV 역추세 & V14 무매 퀀트 코어 </b>\n\n" 
+            f"💠 <b> 2대 퀀트 코어 + AVWAP 하이브리드 엔진 </b>\n\n" 
             f"🕒 <b>[ 운영 스케줄 ({season_short}) ]</b>\n"
             f"🔹 6시간 간격 : 🔑 API 토큰 자동 갱신\n"
             f"🔹 {sync_time} : 📝 잔고 동기화 & 자동 복리\n"
@@ -61,7 +62,7 @@ class TelegramView:
             "▶️ <b>/sync</b> : 📜 통합 지시서 조회\n"
             "▶️ <b>/record</b> : 📊 장부 동기화 및 조회\n"
             "▶️ <b>/history</b> : 🏆 졸업 명예의 전당\n"
-            "▶️ <b>/settlement</b> : ⚙️ 분할/복리/액면 설정\n"
+            "▶️ <b>/settlement</b> : ⚙️ 코어 스위칭 / 전술 설정\n"
             "▶️ <b>/seed</b> : 💵 개별 시드머니 관리\n"
             "▶️ <b>/ticker</b> : 🔄 운용 종목 선택\n"
             "▶️ <b>/mode</b> : 🎯 상방 스나이퍼 ON/OFF\n"
@@ -108,6 +109,23 @@ class TelegramView:
         keyboard = [
             [InlineKeyboardButton("🔥 예, 위험을 인지하고 초기화합니다", callback_data=f"SET_INIT:EXEC_CONFIRM:{ticker}")],
             [InlineKeyboardButton("❌ 아니오, 기존 지층을 유지합니다", callback_data="SETTLEMENT:BACK")]
+        ]
+        return msg, InlineKeyboardMarkup(keyboard)
+
+    # 💡 [V24.18 신규] AVWAP 하이브리드 전술 ON 2단계 승인 팝업
+    def get_avwap_warning_menu(self, ticker):
+        msg = (
+            f"🛑 <b>[ 초긴급 경고: {ticker} 차세대 AVWAP 당일 청산 모드 가동 ]</b>\n\n"
+            f"이 기능은 V-REV가 사용하고 남은 <b>계좌 내 모든 가용 현금 100%</b>를 일시적으로 끌어와, 당일 장중 VWAP -2% 타점에 전액 몰빵(All-in)하는 초공격적 전술입니다.\n\n"
+            f"⚠️ <b>[ 3대 치명적 리스크 ]</b>\n"
+            f"1️⃣ <b>확정 손절:</b> 진입 후 주가가 반등하지 못하고 -3% 하락 시, V-REV 지층과 무관하게 <b>전량 시장가(MOC) 손절</b>이 기계적으로 격발되며 막대한 현금 손실이 확정됩니다.\n"
+            f"2️⃣ <b>현금 고갈:</b> 장중 AVWAP이 현금을 모두 들고 교전하는 동안, 본대인 V-REV 엔진의 긴급 수혈이나 추가 매수가 일시적으로 마비될 수 있습니다.\n"
+            f"3️⃣ <b>타임 스탑:</b> 수익이 나지 않더라도 장 마감 5분 전(15:55 EST)에 무조건 <b>전량 강제 청산</b>됩니다.\n\n"
+            f"🔥 <b>이 모든 펀더멘털 붕괴 리스크와 -3% 확정 손실을 감수하고서라도 AVWAP 스나이퍼를 가동하시겠습니까?</b>"
+        )
+        keyboard = [
+            [InlineKeyboardButton("💥 네, 리스크를 인지했으며 즉시 가동합니다", callback_data=f"MODE:AVWAP_ON:{ticker}")],
+            [InlineKeyboardButton("❌ 아니오, 가동을 취소합니다", callback_data=f"SETTLEMENT:BACK")]
         ]
         return msg, InlineKeyboardMarkup(keyboard)
 
@@ -192,7 +210,6 @@ class TelegramView:
                 
                 keyboard.append([InlineKeyboardButton(btn_text, callback_data=callback_data)])
             
-            # 💡 [V24.18 수술] 팻핑거 방지용 확인 메뉴 진입 라우팅 (EMERGENCY_REQ)
             keyboard.append([InlineKeyboardButton("🩸 수동 긴급 수혈 (최근 로트 강제매도)", callback_data=f"EMERGENCY_REQ:{ticker}")])
         
         keyboard.append([InlineKeyboardButton("🔙 대시보드로 돌아가기", callback_data=f"REC:SYNC:{ticker}")])
@@ -231,22 +248,23 @@ class TelegramView:
             [InlineKeyboardButton("🔙 취소 및 목록으로", callback_data=f"QUEUE:VIEW:{ticker}")]
         ]
         return msg, InlineKeyboardMarkup(keyboard)
-
 # ==========================================================
 # [telegram_view.py] - Part 2/2 부 (하반부)
 # ⚠️ V-REV 설정줄 숨김 및 종목 간 띄어쓰기(엔터) 간격 완벽 교정
 # 💡 [V24.15 대수술] 2대 코어(V14, V-REV) 체제 UI 최적화 및 V_VWAP 적출
+# 💡 [V24.18 하이브리드] V-REV 종속형 AVWAP 투트랙(Two-track) 지시서 표출 로직 융합
+# 💡 [긴급 수술] V-REV 예방적 방어선 수동 장전 버튼(EXEC) UI 100% 복원
 # ==========================================================
 
     def create_sync_report(self, status_text, dst_text, cash, rp_amount, ticker_data, is_trade_active, p_trade_data=None):
-        # 💡 [핵심 수술] LOC 주문이 아직 들어가지 않은(is_locked가 False인) 종목의 필수 예산만 합산
+        # 💡 LOC 주문이 아직 들어가지 않은(is_locked가 False인) 종목의 필수 예산만 합산
         total_required_budget = sum(
             t_info.get('one_portion', 0.0) 
             for t_info in ticker_data 
             if not t_info.get('is_locked', False)
         )
         
-        # 💡 [핵심 수술] KIS 주문가능금액(cash)에서 미주문 필수 예산만 선제적 차감 (이중 차감 방어)
+        # 💡 KIS 주문가능금액(cash)에서 미주문 필수 예산만 선제적 차감 (이중 차감 방어)
         dynamic_rp_amount = max(0.0, cash - total_required_budget)
         
         total_locked = sum(t_info.get('escrow', 0.0) for t_info in ticker_data)
@@ -277,7 +295,6 @@ class TelegramView:
                 body_msg += f"💡 <b>원인 역산 추정:</b> 수동 매수로 수량이 급증했거나, '/seed' 시드머니 설정이 대폭 축소되었습니다.\n"
                 body_msg += f"🛡️ <b>가동 조치:</b> 마이너스 호가 차단용 절대 하한선($0.01) 방어막 가동 중!\n\n"
 
-            # 💡 [다이어트 완료] 오직 V-REV와 V14(디폴트) 2대 코어만 판별
             if v_mode == "V_REV":
                 v_mode_display = "V_REV 역추세"
                 main_icon = "⚖️"
@@ -358,8 +375,6 @@ class TelegramView:
                             
                         if sn_target > 0:
                             body_msg += f"🎯 상방 스나이퍼: ${sn_target:.2f} 이상 대기\n"
-            
-            # 💡 [다이어트 완료] V_VWAP 표출 텍스트 소각
             elif v_mode == "V_REV":
                 body_msg += f"⚖️ <b>역추세 LIFO 큐(Queue) 엔진 스탠바이</b>\n"
                 body_msg += f"⏱️ <b>VWAP 스케줄:</b> 15:30 EST 앵커 세팅 ➔ 1분 단위 교차 타격\n"
@@ -400,6 +415,23 @@ class TelegramView:
                         if grid_start >= 0.01 and grid_start < p2_trigger:
                             grid_end = max(grid_end, 0.01)
                             body_msg += f" 🧹 줍줍(5개): <b>${grid_start:.2f} ~ ${grid_end:.2f} (LOC)</b>\n"
+
+                # 💡 [V24.18 하이브리드] V-REV 모드일 때 AVWAP 켜져있으면 투트랙(Two-track) 지시서 독립 표출
+                if t_info.get('avwap_active', False):
+                    avwap_qty = t_info.get('avwap_qty', 0)
+                    avwap_avg = t_info.get('avwap_avg', 0.0)
+                    avwap_status = t_info.get('avwap_status', '👀 장초반 필터 스캔 대기')
+                    avwap_budget = t_info.get('avwap_budget', 0.0)
+                    
+                    body_msg += f"\n⚔️ <b>[ 하이브리드 AVWAP 암살자 가동 중 ]</b>\n"
+                    body_msg += f"▫️ 잉여 예산(100%): ${avwap_budget:,.0f}\n"
+                    body_msg += f"▫️ 독립 물량: {avwap_qty}주 (평단 ${avwap_avg:.2f})\n"
+                    body_msg += f"▫️ 작전 상태: <b>{avwap_status}</b>\n"
+                    
+                # 🚨 [긴급 수술] V-REV 모드 전용 "수동 장전" 버튼 표출
+                if is_trade_active:
+                    keyboard.append([InlineKeyboardButton(f"🚀 {t} V-REV 방어선 수동 장전", callback_data=f"EXEC:{t}")])
+                
             else:
                 body_msg += f"📋 <b>[주문 계획 - {proc_status}]</b>\n"
                 plan_orders = t_info.get('plan', {}).get('orders', [])
@@ -452,7 +484,6 @@ class TelegramView:
         for t in active_tickers:
             ver = config.get_version(t)
             
-            # 💡 [다이어트 완료] V14, V-REV 2대 코어만 판별
             if ver == "V_REV":
                 icon = "⚖️"
                 ver_display = "V_REV 역추세"
@@ -475,11 +506,23 @@ class TelegramView:
             else:
                 msg += "\n"
                 
-            # 💡 [다이어트 완료] V14 무매4 전환 버튼 단일 유지
             row1 = [
-                InlineKeyboardButton("💎 V14 (무매4)", callback_data=f"SET_VER:V14:{t}")
+                InlineKeyboardButton("💎 V14 (무매4)", callback_data=f"SET_VER:V14:{t}"),
+                InlineKeyboardButton("⚖️ V-REV (역추세)", callback_data=f"SET_VER:V_REV:{t}")
             ]
             keyboard.append(row1)
+
+            if ver == "V_REV":
+                is_avwap = config.get_avwap_hybrid_mode(t) if hasattr(config, 'get_avwap_hybrid_mode') else False
+                
+                avwap_txt = "⚔️ 차세대 AVWAP 하이브리드 [ OFF ]"
+                avwap_cb = f"MODE:AVWAP_WARN:{t}" 
+                
+                if is_avwap:
+                    avwap_txt = "⚔️ 차세대 AVWAP 하이브리드 [ 가동중 ]"
+                    avwap_cb = f"MODE:AVWAP_OFF:{t}" 
+                
+                keyboard.append([InlineKeyboardButton(avwap_txt, callback_data=avwap_cb)])
             
             row2 = [
                 InlineKeyboardButton(f"⚙️ {t} 분할", callback_data=f"INPUT:SPLIT:{t}"), 

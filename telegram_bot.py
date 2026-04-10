@@ -7,6 +7,7 @@
 # 💡 [V24.16 팩트 동기화] /sync 지시서 V-REV 0주 및 1층 가이던스 타점 코어 엔진 동기화 완료
 # 💡 [V24.16 팩트 동기화] 누락된 핸들러 및 콜백 라우터 100% 무손실 복원 완료
 # 💡 [V24.18 수술] 수동 긴급 수혈(Emergency MOC) 3중 경고 및 장외시간 원천 차단 엔진 신설
+# 💡 [V24.18 하이브리드] AVWAP 하이브리드 토글(ON/OFF) 2단계 경고 라우터 융합
 # ==========================================================
 import logging
 import datetime
@@ -78,17 +79,17 @@ class TelegramController:
             rev_state = self.cfg.get_reverse_state(tx)
             is_rev = rev_state.get("is_active", False)
             
+            # 💡 [V24.18 하이브리드] 기본 모드는 2대 코어로 100% 롤백되어 예산 할당을 원복함. (AVWAP은 V-REV 내부에서 잉여 현금을 가져감)
             if is_rev:
-                portion = 0.0
+                allocated[tx] = 0.0 # 리버스는 0 (기존 잔금쿼터 로직에서 처리됨)
             else:
                 split = self.cfg.get_split_count(tx)
                 portion = self.cfg.get_seed(tx) / split if split > 0 else 0
-                
-            if rem_cash >= portion:
-                allocated[tx] = rem_cash
-                rem_cash -= portion
-            else: 
-                allocated[tx] = 0
+                if rem_cash >= portion:
+                    allocated[tx] = portion
+                    rem_cash -= portion
+                else: 
+                    allocated[tx] = 0
                     
         return sorted_tickers, allocated
 
@@ -337,6 +338,13 @@ class TelegramController:
                 v_rev_q_lots = 0
                 v_rev_guidance = ""
                 
+                # 💡 [V24.18 하이브리드] V-REV 모드일 때만 AVWAP 추가 스캔
+                is_avwap_active = False
+                avwap_budget = 0.0
+                avwap_qty = 0
+                avwap_avg = 0.0
+                avwap_status_txt = ""
+
                 if ver == "V_REV":
                     if not getattr(self, 'queue_ledger', None):
                         from queue_ledger import QueueLedger
@@ -356,7 +364,6 @@ class TelegramController:
                         recent_lots = list(reversed(q_list))[:3]
                         for idx, lot in enumerate(recent_lots):
                             if idx == 0:
-                                # 💡 [V24.16 수술] 1층은 전일 종가가 아닌 해당 지층(lot)의 고유 평단가 기반으로 1.006 동기화
                                 target_sell_price = round(lot.get('price', safe_prev_close) * 1.006, 2)
                             else:
                                 target_sell_price = round(actual_avg * 1.005, 2)
@@ -369,7 +376,6 @@ class TelegramController:
                     else:
                         v_rev_guidance += f" 🔵 매도(Pop): 대기 물량 없음 (관망)\n"
                     
-                    # 💡 [V24.16 수술] 0주 새출발 타점 디커플링 (0.999 및 /0.935) 및 하락 방어 Buy2 타점(0.9725) 코어 엔진 동기화 완료
                     b1_price = round(safe_prev_close * 0.999 if v_rev_q_qty == 0 else safe_prev_close * 0.995, 2)
                     b2_price = round(safe_prev_close / 0.935 if v_rev_q_qty == 0 else safe_prev_close * 0.9725, 2)
                     
@@ -378,6 +384,22 @@ class TelegramController:
                     
                     v_rev_guidance += f" 🔴 매수1(Buy1): ${b1_price:.2f} 진입 시 <b>{b1_qty}주</b>\n"
                     v_rev_guidance += f" 🔴 매수2(Buy2): ${b2_price:.2f} 진입 시 <b>{b2_qty}주</b>"
+
+                    # 💡 [V24.18 하이브리드] V-REV 모드 내부의 AVWAP 엔진 파싱
+                    if hasattr(self.cfg, 'get_avwap_hybrid_mode') and self.cfg.get_avwap_hybrid_mode(t):
+                        is_avwap_active = True
+                        avwap_qty = tracking_cache.get(f"AVWAP_QTY_{t}", 0)
+                        avwap_avg = tracking_cache.get(f"AVWAP_AVG_{t}", 0.0)
+                        
+                        v_rev_locked_cash = half_portion_cash * 2 # 대충 V-REV가 가져갈 최대 주문 보증금
+                        avwap_budget = max(0.0, cash - v_rev_locked_cash) # 나머지 전체 잉여현금
+                        
+                        if tracking_cache.get(f"AVWAP_SHUTDOWN_{t}"):
+                            avwap_status_txt = "🛑 영구동결 (SHUTDOWN)"
+                        elif tracking_cache.get(f"AVWAP_BOUGHT_{t}"):
+                            avwap_status_txt = "🎯 딥매수 완료 (익절/손절 감시중)"
+                        else:
+                            avwap_status_txt = "👀 장초반 필터 스캔 및 타점 대기"
 
                 ticker_data_list.append({
                     'ticker': t, 'version': ver, 't_val': t_val, 'split': split, 'curr': curr, 'avg': actual_avg, 'qty': actual_qty,
@@ -405,7 +427,12 @@ class TelegramController:
                     'vol_status': vol_status,
                     'v_rev_q_lots': v_rev_q_lots,
                     'v_rev_q_qty': v_rev_q_qty,
-                    'v_rev_guidance': v_rev_guidance
+                    'v_rev_guidance': v_rev_guidance,
+                    'avwap_active': is_avwap_active,
+                    'avwap_budget': avwap_budget,
+                    'avwap_qty': avwap_qty,
+                    'avwap_avg': avwap_avg,
+                    'avwap_status': avwap_status_txt
                 })
                 total_buy_needed += sum(o['price']*o['qty'] for o in plan['orders'] if o['side']=='BUY')
 
@@ -473,7 +500,7 @@ class TelegramController:
                     self.cfg.apply_stock_split(ticker, split_ratio)
                     self.cfg.set_last_split_date(ticker, split_date)
                     split_type = "액면분할" if split_ratio > 1.0 else "액면병합(역분할)"
-                    await context.bot.send_message(chat_id, f"✂️ <b>[{ticker}] 야 파이낸스 {split_type} 자동 감지!</b>\n▫️ 감지된 비율: <b>{split_ratio}배</b> (발생일: {split_date})\n▫️ 봇이 기존 장부의 수량과 평단가를 100% 무인 자동 소급 조정 완료했습니다.", parse_mode='HTML')
+                    await context.bot.send_message(chat_id, f"✂️ <b>[{ticker}] 야후 파이낸스 {split_type} 자동 감지!</b>\n▫️ 감지된 비율: <b>{split_ratio}배</b> (발생일: {split_date})\n▫️ 봇이 기존 장부의 수량과 평단가를 100% 무인 자동 소급 조정 완료했습니다.", parse_mode='HTML')
                 
                 kst = pytz.timezone('Asia/Seoul')
                 now_kst = datetime.datetime.now(kst)
@@ -690,13 +717,14 @@ class TelegramController:
         if query: await query.edit_message_text(msg, reply_markup=markup, parse_mode='HTML')
         elif message_obj: await message_obj.edit_text(msg, reply_markup=markup, parse_mode='HTML')
         else: await context.bot.send_message(chat_id, msg, reply_markup=markup, parse_mode='HTML')
-
 # ==========================================================
 # [telegram_bot.py] - Part 2/2 부 (하반부)
 # ⚠️ 수술 내역: 
 # 1. 누락되었던 7개 명령어 핸들러(cmd_history ~ cmd_version) 100% 무손실 복원
 # 2. 인라인 버튼 중앙 통제 라우터(handle_callback) 및 텍스트 핸들러 완벽 복원
-# 💡 [V24.18 수술] 수동 긴급 수혈(EMERGENCY_REQ, EMERGENCY_EXEC) 장외시간 사전 차단 및 MOC 격발 엔진 신설
+# 💡 [V24.18 수술] 수동 긴급 수혈(Emergency MOC) 장외시간 사전 차단 및 MOC 격발 엔진 신설
+# 💡 [V24.18 하이브리드] AVWAP 하이브리드 토글(ON/OFF/WARN) 2단계 경고 라우터 융합 완료
+# 🚨 [긴급 수술] V-REV 예방적 LOC 덫 수동 장전 라우터(EXEC) 완벽 분리 이식
 # ==========================================================
 
     async def cmd_history(self, update, context):
@@ -819,14 +847,7 @@ class TelegramController:
                 
         msg, markup = self.view.get_settlement_message(active_tickers, self.cfg, atr_data, dynamic_target_data)
         
-        # 💡 [다이어트 완료] V_VWAP 전환 버튼 소각 및 2대 코어 전용 버튼 렌더링
-        keyboard = list(markup.inline_keyboard) if markup else []
-        for t in active_tickers:
-            keyboard.append([InlineKeyboardButton(f"🔄 [{t}] V_REV (역추세 하이브리드) 전환", callback_data=f"SET_VER:V_REV:{t}")])
-            keyboard.append([InlineKeyboardButton(f"▶️ [{t}] V14 (오리지널 무매) 전환", callback_data=f"SET_VER:V14:{t}")])
-        
-        new_markup = InlineKeyboardMarkup(keyboard)
-        await status_msg.edit_text(msg, reply_markup=new_markup, parse_mode='HTML')
+        await status_msg.edit_text(msg, reply_markup=markup, parse_mode='HTML')
 
     async def cmd_version(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_admin(update): return
@@ -843,7 +864,7 @@ class TelegramController:
         if action == "QUEUE":
             if sub == "VIEW":
                 ticker = data[2]
-                if self.queue_ledger:
+                if getattr(self, 'queue_ledger', None):
                     q_data = self.queue_ledger.get_queue(ticker)
                 else:
                     q_data = []
@@ -855,11 +876,9 @@ class TelegramController:
                 msg, markup = self.view.get_queue_management_menu(ticker, q_data)
                 await query.edit_message_text(msg, reply_markup=markup, parse_mode='HTML')
 
-        # 💡 [V24.18 수술] 수동 긴급 수혈 3중 경고 UI 진입 (Phase 1) 및 장외시간 사전 차단
         elif action == "EMERGENCY_REQ":
             ticker = sub
             
-            # 🚨 [엣지 케이스 방어] 장운영시간(프리장, 정규장) 외 진입 원천 차단
             status_code, _ = self._get_market_status()
             if status_code not in ["PRE", "REG"]:
                 await query.answer("❌ [격발 차단] 현재 장운영시간(정규장/프리장)이 아닙니다.", show_alert=True)
@@ -882,12 +901,10 @@ class TelegramController:
             msg, markup = self.view.get_emergency_moc_confirm_menu(ticker, emergency_qty, emergency_price)
             await query.edit_message_text(msg, reply_markup=markup, parse_mode='HTML')
 
-        # 💡 [V24.18 수술] 수동 긴급 수혈 시장가(MOC) 실제 격발 (Phase 2)
         elif action == "EMERGENCY_EXEC":
             ticker = sub
             status_code, _ = self._get_market_status()
             
-            # 🚨 [엣지 케이스 방어] 장운영시간(프리장, 정규장) 외 격발 원천 차단 (이중 확인)
             if status_code not in ["PRE", "REG"]:
                 await query.answer("❌ [격발 차단] 현재 장운영시간(정규장/프리장)이 아닙니다.", show_alert=True)
                 return
@@ -907,7 +924,6 @@ class TelegramController:
             
             if emergency_qty > 0:
                 async with self.tx_lock:
-                    # 💡 [핵심 수술] LIMIT에서 MOC로 주문 타입 형변환 및 가격(price) 0.0 강제 세팅
                     res = self.broker.send_order(ticker, "SELL", emergency_qty, 0.0, "MOC")
                     
                     if res.get('rt_cd') == '0':
@@ -928,7 +944,7 @@ class TelegramController:
             ticker = sub
             target_date = ":".join(data[2:])
             
-            q_data = self.queue_ledger.get_queue(ticker) if self.queue_ledger else []
+            q_data = self.queue_ledger.get_queue(ticker) if getattr(self, 'queue_ledger', None) else []
             if not q_data:
                 try:
                     with open("data/queue_ledger.json", "r") as f:
@@ -1108,19 +1124,76 @@ class TelegramController:
                 _, allocated_cash = self._calculate_budget_allocation(cash, self.cfg.get_active_tickers())
                 h = holdings.get(t, {'qty':0, 'avg':0})
                 
-                curr_p = await asyncio.to_thread(self.broker.get_current_price, t)
-                prev_c = await asyncio.to_thread(self.broker.get_previous_close, t)
+                curr_p = float(await asyncio.to_thread(self.broker.get_current_price, t) or 0.0)
+                prev_c = float(await asyncio.to_thread(self.broker.get_previous_close, t) or 0.0)
+                safe_avg = float(h.get('avg') or 0.0)
+                safe_qty = int(float(h.get('qty') or 0))
+
+                # =========================================================
+                # 🚨 [긴급 수술] V-REV 예방적 LOC 덫 수동 장전 라우터 분리
+                # =========================================================
+                if ver == "V_REV":
+                    if not getattr(self, 'queue_ledger', None):
+                        from queue_ledger import QueueLedger
+                        self.queue_ledger = QueueLedger()
+                        
+                    q_data = self.queue_ledger.get_queue(t)
+                    v_rev_q_qty = sum(item.get("qty", 0) for item in q_data)
+                    rev_budget = float(self.cfg.get_seed(t) or 0.0) * 0.15
+                    
+                    half_portion_cash = rev_budget * 0.5
+                    one_portion_qty = math.floor(rev_budget / curr_p) if curr_p > 0 else 0
+                    
+                    loc_orders = []
+                    
+                    if q_data:
+                        recent_lots = list(reversed(q_data))[:3]
+                        for idx, lot in enumerate(recent_lots):
+                            target_sell_price = round(lot.get('price', prev_c) * 1.006, 2) if idx == 0 else round(safe_avg * 1.005, 2)
+                            sell_qty = min(lot['qty'], one_portion_qty) if one_portion_qty > 0 else lot['qty']
+                            if sell_qty > 0:
+                                loc_orders.append({'side': 'SELL', 'qty': sell_qty, 'price': target_sell_price, 'type': 'LOC', 'desc': f'예방적 매도(Pop{idx+1})'})
+                    
+                    if prev_c > 0:
+                        b1_price = round(prev_c * 0.999 if v_rev_q_qty == 0 else prev_c * 0.995, 2)
+                        b2_price = round(prev_c / 0.935 if v_rev_q_qty == 0 else prev_c * 0.9725, 2)
+                        
+                        b1_qty = math.floor(half_portion_cash / b1_price) if b1_price > 0 else 0
+                        b2_qty = math.floor(half_portion_cash / b2_price) if b2_price > 0 else 0
+                        
+                        if b1_qty > 0:
+                            loc_orders.append({'side': 'BUY', 'qty': b1_qty, 'price': b1_price, 'type': 'LOC', 'desc': '예방적 매수(Buy1)'})
+                        if b2_qty > 0:
+                            loc_orders.append({'side': 'BUY', 'qty': b2_qty, 'price': b2_price, 'type': 'LOC', 'desc': '예방적 매수(Buy2)'})
+
+                    msg = f"🛡️ <b>[{t}] V-REV 예방적 양방향 LOC 방어선 수동 장전 완료</b>\n"
+                    all_success = True
+                    for o in loc_orders:
+                        res = self.broker.send_order(t, o['side'], o['qty'], o['price'], o['type'])
+                        is_success = res.get('rt_cd') == '0'
+                        if not is_success: all_success = False
+                        err_msg = res.get('msg1', '오류')
+                        status_icon = '✅' if is_success else f'❌({err_msg})'
+                        msg += f"└ {o['desc']} {o['qty']}주 (${o['price']}): {status_icon}\n"
+                        await asyncio.sleep(0.2)
+                        
+                    if all_success and len(loc_orders) > 0:
+                        self.cfg.set_lock(t, "REG")
+                        msg += "\n🔒 <b>방어선 전송 완료 (매매 잠금 설정됨)</b>"
+                    elif len(loc_orders) == 0:
+                        msg += "\n⚠️ <b>전송할 방어선(예산/수량)이 없습니다.</b>"
+                    else:
+                        msg += "\n⚠️ <b>일부 방어선 구축 실패 (잠금 보류)</b>"
+                        
+                    await context.bot.send_message(update.effective_chat.id, msg, parse_mode='HTML')
+                    return
+                # =========================================================
+                
+                # [기존 V14 전용 오리지널 강제 전송 로직 유지]
                 ma_5day = await asyncio.to_thread(self.broker.get_5day_ma, t)
+                plan = self.strategy.get_plan(t, curr_p, safe_avg, safe_qty, prev_c, ma_5day=ma_5day, market_type="REG", available_cash=allocated_cash[t])
                 
-                plan = self.strategy.get_plan(t, curr_p, float(h['avg']), int(h['qty']), prev_c, ma_5day=ma_5day, market_type="REG", available_cash=allocated_cash[t])
-                
-                is_rev = plan.get('is_reverse', False)
-                
-                # 💡 [다이어트 완료] V_VWAP 표기 적출
-                if ver == "V_REV": ver_display = "V_REV 역추세 하이브리드"
-                else: ver_display = "V14 무매4"
-                
-                title = f"🔄 <b>[{t}] {ver_display} 리버스 주문 수동 실행</b>\n" if is_rev else f"💎 <b>[{t}] 정규장 주문 수동 실행</b>\n"
+                title = f"💎 <b>[{t}] 무매4 정규장 주문 수동 실행</b>\n"
                 msg = title
                 
                 all_success = True
@@ -1158,15 +1231,46 @@ class TelegramController:
                 if not (os.path.exists("strategy_reversion.py") and os.path.exists("queue_ledger.py")):
                     await query.answer("🚨 [개봉박두] V-REV 엔진 모듈 파일이 존재하지 않아 전환할 수 없습니다! (업데이트 필요)", show_alert=True)
                     return
-                self.cfg.set_upward_sniper_mode(ticker, False)
-            
-            # 💡 [다이어트 완료] V_VWAP 표기 적출
+                self.cfg.set_upward_sniper_mode(ticker, False) 
+                
             if new_ver == "V_REV": new_ver_display = "V_REV 역추세 하이브리드"
             else: new_ver_display = "V14 무매4"
             
             self.cfg.set_version(ticker, new_ver)
-            await query.edit_message_text(f"✅ <b>[{ticker}]</b> 퀀트 엔진이 <b>{new_ver_display}</b> 모드로 직접 전환되었습니다.\n/sync 명령어에서 변경된 지시서를 확인하세요.", parse_mode='HTML')
+            
+            if new_ver != "V_REV" and hasattr(self.cfg, 'set_avwap_hybrid_mode'):
+                self.cfg.set_avwap_hybrid_mode(ticker, False)
+                
+            await query.edit_message_text(f"✅ <b>[{ticker}]</b> 퀀트 엔진이 <b>{new_ver_display}</b> 모드로 전환되었습니다.\n/sync 명령어에서 변경된 지시서를 확인하세요.", parse_mode='HTML')
 
+        elif action == "MODE":
+            mode_val = sub
+            ticker = data[2] if len(data) > 2 else "SOXL"
+            
+            if mode_val == "AVWAP_WARN":
+                msg, markup = self.view.get_avwap_warning_menu(ticker)
+                await query.edit_message_text(msg, reply_markup=markup, parse_mode='HTML')
+                return
+            elif mode_val == "AVWAP_ON":
+                if hasattr(self.cfg, 'set_avwap_hybrid_mode'):
+                    self.cfg.set_avwap_hybrid_mode(ticker, True)
+                self.cfg.set_upward_sniper_mode(ticker, False) 
+                await query.edit_message_text(f"🔥 <b>[{ticker}] 차세대 AVWAP 하이브리드 암살자 모드가 락온(Lock-on) 되었습니다!</b>\n▫️ 남은 가용 예산 100%를 활용하여 장중 -2% 타점을 정밀 사냥합니다.", parse_mode='HTML')
+                return
+            elif mode_val == "AVWAP_OFF":
+                if hasattr(self.cfg, 'set_avwap_hybrid_mode'):
+                    self.cfg.set_avwap_hybrid_mode(ticker, False)
+                await query.edit_message_text(f"🛑 <b>[{ticker}] 차세대 AVWAP 하이브리드 전술이 즉시 해제되었습니다.</b>", parse_mode='HTML')
+                return
+
+            current_ver = self.cfg.get_version(ticker)
+            if current_ver == "V_REV" and mode_val == "ON":
+                await query.answer(f"🚨 {current_ver} 모드에서는 로직 충돌 방지를 위해 상방 스나이퍼를 켤 수 없습니다!", show_alert=True)
+                return
+                
+            self.cfg.set_upward_sniper_mode(ticker, mode_val == "ON")
+            await query.edit_message_text(f"✅ <b>[{ticker}]</b> 상방 스나이퍼 모드 변경 완료: {'🎯 ON (가동중)' if mode_val == 'ON' else '⚪ OFF (대기중)'}", parse_mode='HTML')
+            
         elif action == "SET_INIT":
             ticker = data[2]
             if sub == "V_REV":
@@ -1200,17 +1304,6 @@ class TelegramController:
         elif action == "TICKER":
             self.cfg.set_active_tickers([sub] if sub != "ALL" else ["SOXL", "TQQQ"])
             await query.edit_message_text(f"✅ 운용 종목 변경: {sub}")
-            
-        elif action == "MODE":
-            mode_val = sub
-            ticker = data[2] if len(data) > 2 else "SOXL"
-            
-            if self.cfg.get_version(ticker) == "V_REV" and mode_val == "ON":
-                await query.answer("🚨 V-REV 역추세 모드에서는 로직 충돌 방지를 위해 상방 스나이퍼를 켤 수 없습니다!", show_alert=True)
-                return
-                
-            self.cfg.set_upward_sniper_mode(ticker, mode_val == "ON")
-            await query.edit_message_text(f"✅ <b>[{ticker}]</b> 상방 스나이퍼 모드 변경 완료: {'🎯 ON (가동중)' if mode_val == 'ON' else '⚪ OFF (대기중)'}", parse_mode='HTML')
             
         elif action == "SEED":
             ticker = data[2]
