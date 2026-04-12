@@ -1,7 +1,9 @@
 # ==========================================================
-# [broker.py] (1부 / 2부) - 🌟 100% 통합 완성본 🌟
+# [broker.py] - 🌟 100% 통합 완성본 🌟
 # ⚠️ 수술 내역: 야후 파이낸스(yfinance) 좀비 스레드 누적 방지
 # 모든 history() 호출에 timeout=5 파라미터 강제 주입 완료
+# 🚨 [V25.19 핫픽스] 토큰 만료 시간 타임존(Timezone) Naive/Aware 충돌 교정
+# 🚨 [V25.19 핫픽스] Windows 환경 임시 파일 권한(Permission) 락 충돌 방어 (shutil.move 도입)
 # ==========================================================
 
 import requests
@@ -13,6 +15,7 @@ import math
 import yfinance as yf
 import pytz
 import tempfile
+import shutil  # NEW: [V25.19 핫픽스] 파일 권한 충돌 방어용 라이브러리 추가
 import pandas as pd   
 import numpy as np
 import volatility_engine as ve  
@@ -36,7 +39,12 @@ class KoreaInvestmentBroker:
                 with open(self.token_file, 'r') as f:
                     saved = json.load(f)
                 expire_time = datetime.datetime.strptime(saved['expire'], '%Y-%m-%d %H:%M:%S')
-                if expire_time > datetime.datetime.now() + datetime.timedelta(hours=1):
+                
+                # MODIFIED: [V25.19 핫픽스] 타임존 충돌을 막기 위해 현재 시간을 Naive Datetime으로 교정
+                kst = pytz.timezone('Asia/Seoul')
+                now_kst_naive = datetime.datetime.now(kst).replace(tzinfo=None)
+                
+                if expire_time > now_kst_naive + datetime.timedelta(hours=1):
                     self.token = saved['token']
                     return
             except Exception: pass
@@ -63,7 +71,9 @@ class KoreaInvestmentBroker:
                     json.dump({'token': self.token, 'expire': expire_str}, f)
                     f.flush()
                     os.fsync(fd)
-                os.replace(temp_path, self.token_file)
+                
+                # MODIFIED: [V25.19 핫픽스] Windows 환경에서 파일 핸들(fd) 권한 에러를 우회하는 shutil.move 이식
+                shutil.move(temp_path, self.token_file)
             else:
                 print(f"❌ [Broker] 토큰 발급 실패: {data.get('error_description', '알 수 없는 오류')}")
         except Exception as e:

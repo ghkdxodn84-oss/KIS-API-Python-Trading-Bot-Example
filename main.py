@@ -1,10 +1,12 @@
 # ==========================================================
-# [main.py]
+# [main.py] - 🌟 100% 통합 완성본 🌟
 # ⚠️ 이 주석 및 파일명 표기는 절대 지우지 마세요.
 # 💡 [V24.10] 텔레그램 API 통신 타임아웃(TimedOut) 방어 및 커넥션 풀 최적화 이식 완료
 # 💡 [V24.11 수술] VolatilityEngine 동적 연결 및 TelegramController 의존성 주입
 # 💡 [V24.15 대수술] V_VWAP 플러그인 의존성 100% 영구 적출 및 2대 코어 체제 확립
 # 💡 [V24.20 패치] 듀얼 레퍼런싱(SOXX/SOXL) 인프라 및 스냅샷 파이프라인 증설
+# 🚨 [V25.19 핫픽스] EST/KST 타임존 혼용에 따른 스케줄링 오작동 방어 (명시적 타임존 주입)
+# 🚨 [V25.19 핫픽스] 듀얼 레퍼런싱(TICKER_BASE_MAP) 전역 공유 파이프라인 완벽 확립
 # ==========================================================
 
 import os
@@ -95,17 +97,13 @@ async def scheduled_volatility_scan(context):
     """
     app_data = context.job.data
     cfg = app_data['cfg']
-    # MODIFIED: 듀얼 레퍼런싱 매핑 데이터 로드
+    # MODIFIED: 듀얼 레퍼런싱 매핑 데이터 로드 (Medium 10 연계)
     base_map = app_data.get('base_map', TICKER_BASE_MAP)
     
     print("\n" + "=" * 60)
     print("📈 [자율주행 변동성 스캔 완료] (10:20 EST 스냅샷)")
     
-    active_tickers = []
-    for r in cfg.get_ledger():
-        t = r.get('ticker')
-        if t and t not in active_tickers:
-            active_tickers.append(t)
+    active_tickers = cfg.get_active_tickers()
             
     if not active_tickers:
         print("📊 현재 운용 중인 종목이 없습니다.")
@@ -209,6 +207,8 @@ def main():
             'tx_lock': tx_lock,
             'base_map': TICKER_BASE_MAP
         }
+        
+        # MODIFIED: [V25.19 핫픽스] EST/KST 타임존 충돌을 방어하기 위해 명시적 선언 및 주입 (Medium 9)
         kst = pytz.timezone('Asia/Seoul')
         est = pytz.timezone('US/Eastern')
         

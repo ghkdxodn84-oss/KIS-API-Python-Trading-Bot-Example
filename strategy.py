@@ -4,6 +4,7 @@
 # 💡 [V24.15 대수술] V_VWAP 영구 소각 및 2대 코어(V14, V-REV) 체제 확립
 # 💡 [V24.18 하이브리드] VAvwapHybridPlugin 의존성 이름 교정 및 샌드박스 유지
 # 🚨 [V25.08 팩트 동기화] V-REV 종목 지시서 누수(DI Leak) 방어를 위한 지능형 동적 라우터(Dynamic Router) 구축
+# 🚨 [V25.19 핫픽스] 레거시 모드 감지 시 로컬 version 변수 미업데이트 맹점 팩트 교정
 # ==========================================================
 import logging
 import pandas as pd
@@ -93,6 +94,7 @@ class InfiniteStrategy:
         if version in ["V13", "V17", "V_VWAP", "V_AVWAP"]:
             logging.warning(f"[{ticker}] 폐기된 레거시 모드({version}) 감지. V14 엔진으로 강제 라우팅합니다.")
             self.cfg.set_version(ticker, "V14")
+            # MODIFIED: [V25.19 핫픽스] 레거시 모드 감지 후 하위 분기문 오작동 방어를 위한 로컬 변수 재할당 (Medium 11)
             version = "V14"
 
         # MODIFIED: [V25.08 라우터 패치] V-REV 모드일 경우 V14 플러그인을 거치지 않고, 

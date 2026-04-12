@@ -1,9 +1,11 @@
 # ==========================================================
-# [scheduler_trade.py] - Part 1/2 부 (상반부)
+# [scheduler_trade.py] - 🌟 100% 통합 완성본 🌟
 # ⚠️ 수술 내역: 
 # 🚨 [V25.03 긴급 수술] 타임존 Glitch 방어 및 상대적 시간 윈도우(Relative Time Window) 도입
 # 💡 하드코딩된 '15시' 비교를 폐기하고 '장 마감(market_close) 30분 전' 앵커 시스템으로 전면 교체
 # 🚨 [V25.04 패치] 듀얼 레퍼런싱 데이터(SOXX/SOXL) 이원화 호출 및 파이프라인 연동
+# 🚨 [V25.19 핫픽스] 서머타임(DST) 경계일 프리마켓 시간 연산 에러(NonExistentTimeError) 수학적 교정
+# 🚨 [V25.19 핫픽스] 듀얼 레퍼런싱 base_map 매핑 누락 시 파생상품 오호출 맹점 방어
 # ==========================================================
 import os
 import logging
@@ -41,7 +43,8 @@ async def scheduled_sniper_monitor(context):
             market_close = now_est.replace(hour=16, minute=0, second=0, microsecond=0)
         else: return
     
-    pre_start = market_open.replace(hour=4, minute=0)
+    # MODIFIED: [V25.19 핫픽스] DST 전환일(NonExistentTimeError) 방어를 위해 상대적 시간차 연산으로 교체 (High 6)
+    pre_start = market_open - datetime.timedelta(hours=5, minutes=30)
     start_monitor = pre_start + datetime.timedelta(minutes=1)
     end_monitor = market_close - datetime.timedelta(minutes=1)
     
@@ -52,7 +55,9 @@ async def scheduled_sniper_monitor(context):
     
     app_data = context.job.data
     cfg, broker, strategy, tx_lock = app_data['cfg'], app_data['broker'], app_data['strategy'], app_data['tx_lock']
-    base_map = app_data.get('base_map', {})  # NEW: 듀얼 레퍼런싱 매핑 로드
+    
+    # MODIFIED: [V25.19 핫픽스] base_map 누락 시 파생상품을 그대로 호출하는 맹점 방어 (Medium 10)
+    base_map = app_data.get('base_map', {'SOXL': 'SOXX', 'TQQQ': 'QQQ'})
     chat_id = context.job.chat_id
     
     tracking_cache = app_data.setdefault('sniper_tracking', {})
@@ -243,7 +248,7 @@ async def scheduled_vwap_trade(context):
                             await asyncio.to_thread(broker.cancel_all_orders_safe, t, "SELL")
                             vwap_cache[f"REV_{t}_nuked"] = True
                             msg = f"🌅 <b>[{t}] 하이브리드 타임 슬라이싱 기상 (자가 치유 가동)</b>\n"
-                            msg += f"▫️ 장 마감 30분 전 진입을 확인하여 기존 LOC 덫을 강제 취소(Nuke)했습니다.\n"
+                            msg += f"▫️ 장 마감 30분 전 진입을 확인하여 기존 LOC 덫 강제 취소(Nuke)했습니다.\n"
                             msg += f"▫️ 스케줄러 누락을 완벽히 극복하고 1분 단위 정밀 타격을 즉각 개시합니다. ⚔️"
                             await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML', disable_notification=True)
                             await asyncio.sleep(1.0)

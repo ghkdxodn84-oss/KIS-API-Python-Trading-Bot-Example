@@ -1,9 +1,11 @@
 # ==========================================================
-# [scheduler_core.py] - Part 1/2 부 (상반부)
+# [scheduler_core.py] - 🌟 100% 통합 완성본 🌟
 # ⚠️ 이 주석 및 파일명 표기는 절대 지우지 마세요.
 # 💡 [V24.09 패치] API 결측치(None) 방어용 Safe Casting 전면 이식 완료
 # 💡 [V24.10 수술] V_REV 동적 에스크로 차감 방어 (이중 차감 방지)
 # 🚨 [V25.02 수술] 리버스 모드 일일 1회 확정 탈출(TQQQ -15% / SOXL -20%) 엔진 팩트 이식
+# 🚨 [V25.19 핫픽스] 자정(Midnight) 래핑(Wrap-around) 시간 오차 수학적 교정
+# 🚨 [V25.19 핫픽스] 리버스 확정 탈출 시 무조건 누적(increment)되던 데드코드 분리 차단
 # ==========================================================
 import os
 import logging
@@ -150,8 +152,8 @@ async def scheduled_token_check(context):
     # 💡 [수술 완료] 오타(tothread) 교정
     await asyncio.to_thread(context.job.data['broker']._get_access_token, force=True)
     logging.info("🔑 [API 토큰 갱신] 토큰 갱신이 안전하게 완료되었습니다.")
+
 # ==========================================================
-# [scheduler_core.py] - Part 2/2 부 (하반부)
 # 🚨 [V25.02 핵심 수술] 리버스 모드 절대 하드스탑(TQQQ -15% / SOXL -20%) 확정 탈출 엔진 이식
 # 💡 가변 변수(exit_target) 의존성 100% 적출 및 타임 패러독스 원천 차단
 # ==========================================================
@@ -164,7 +166,9 @@ async def scheduled_force_reset(context):
     now_minutes = now.hour * 60 + now.minute
     target_minutes = target_hour * 60
     
-    if abs(now_minutes - target_minutes) > 2 and abs(now_minutes - target_minutes) < (24*60 - 2):
+    # MODIFIED: [V25.19 핫픽스] 자정 래핑(Wrap-around) 오차 수학적 교정 (High 4)
+    diff = min((now_minutes - target_minutes) % 1440, (target_minutes - now_minutes) % 1440)
+    if diff > 2:
         return
         
     if not is_market_open():
@@ -224,6 +228,7 @@ async def scheduled_force_reset(context):
                             cfg._save_json(cfg.FILES["LEDGER"], ledger_data)
                             
                         msg_addons += f"\n🌤️ <b>[{t}] 리버스 확정 탈출 조건 달성 (수익률: {curr_ret:.2f}% >= 기준: {exit_threshold}%)!</b>\n▫️ 격리 병동을 즉시 폐쇄하고 V14 본대로 완벽히 복귀했습니다."
+                    # MODIFIED: [V25.19 핫픽스] 탈출 성공 시 무조건 누적되던 데드코드 방어 (High 5)
                     else:
                         cfg.increment_reverse_day(t)
                 else:
