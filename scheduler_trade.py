@@ -6,6 +6,7 @@
 # 🚨 [V25.04 패치] 듀얼 레퍼런싱 데이터(SOXX/SOXL) 이원화 호출 및 파이프라인 연동
 # 🚨 [V25.19 핫픽스] 서머타임(DST) 경계일 프리마켓 시간 연산 에러(NonExistentTimeError) 수학적 교정
 # 🚨 [V25.19 핫픽스] 듀얼 레퍼런싱 base_map 매핑 누락 시 파생상품 오호출 맹점 방어
+# 🚨 [V25.20 핫픽스] 잭팟 스윕 피니셔 MOC 락다운 충돌 방어 및 순수 매도 가능 잔량 디커플링 연산 이식
 # ==========================================================
 import os
 import logging
@@ -140,13 +141,6 @@ async def scheduled_sniper_monitor(context):
                     continue
 
                 # (이하 V14 상방 스나이퍼 로직 동일 유지...)
-# ==========================================================
-# [scheduler_trade.py] - Part 2/2 부 (하반부)
-# 🚨 [V25.03 핵심 수술] 하드코딩 시간(Hour) 폐기 및 상대적 타임 윈도우(Relative Time Window) 이식
-# 🚨 [V25.03 핵심 수술] 기존 LOC 덫 취소 실패 시 자가 치유(Self-Healing Nuke) 방어막 탑재
-# 🚨 [V25.14 분할 LOC 패치] 17:05 정규장 덫 장전 시 1층/상위층 완벽 분리 전송 디커플링 이식
-# 🚨 [V25.16 수학적 교정] 17:05 정규장 덫 1층 데이터 추출 시 배열 인덱싱 병목 소각 및 날짜 기반 합산 로직 완벽 이식
-# ==========================================================
 
 # ==========================================================
 # 2. 🛡️ Fail-Safe: 선제적 LOC 취소 (기본 스케줄러, 자가치유로 보완됨)
@@ -186,10 +180,10 @@ async def scheduled_vwap_init_and_cancel(context):
         await asyncio.wait_for(_do_init(), timeout=45.0)
     except Exception as e:
         logging.error(f"🚨 Fail-Safe 타임아웃 에러: {e}")
-
 # ==========================================================
 # 3. ⏱️ 1분봉 정밀 타격 (V-REV 전용 타임 슬라이싱)
 # 🚨 [V25.03 수술] 시간 앵커(market_close) 기반 동적 역산 알고리즘 도입
+# 🚨 [V25.20 핫픽스] 잭팟 스윕 피니셔 MOC 락다운 충돌 방어 및 순수 매도 가능 잔량 디커플링 연산 이식
 # ==========================================================
 async def scheduled_vwap_trade(context):
     if not is_market_open(): return
@@ -296,33 +290,48 @@ async def scheduled_vwap_trade(context):
                             await asyncio.to_thread(broker.cancel_all_orders_safe, t, "SELL")
                             await asyncio.sleep(0.5)
                             
-                            bid_price = float(await asyncio.to_thread(broker.get_bid_price, t) or 0.0)
-                            exec_price = bid_price if bid_price > 0 else curr_p
+                            # MODIFIED: [V25.20 핫픽스] 미국 거래소 MOC 취소 불가 락다운 방어를 위한 디커플링 연산
+                            # 증권사 계좌를 실시간으로 재스캔하여 취소되지 않고 잠긴(Locked) 물량을 수학적으로 차감
+                            _, live_holdings = await asyncio.to_thread(broker.get_account_balance)
+                            if live_holdings and t in live_holdings:
+                                # broker.py 확장을 통해 ord_psbl_qty(순수 매도 가능 잔량)를 반환받음
+                                sellable_qty = int(float(live_holdings[t].get('ord_psbl_qty', live_holdings[t].get('qty', 0))))
+                                if sellable_qty < target_sweep_qty:
+                                    target_sweep_qty = sellable_qty
+                                    sweep_type += " (MOC 잠금분 디커플링 차감)"
                             
-                            res = broker.send_order(t, "SELL", target_sweep_qty, exec_price, "LIMIT")
-                            odno = res.get('odno', '')
-                            
-                            if res.get('rt_cd') == '0' and odno:
-                                msg = f"🌪️ <b>[{t}] V-REV 본대 {sweep_type} 강제 청산 (Sweep Finisher) 발동!</b>\n"
-                                if sweep_type == "잭팟 전량":
-                                    msg += f"▫️ 장 마감을 2분 앞두고 잭팟 커트라인({jackpot_trigger:.2f}) 돌파를 확인했습니다.\n"
-                                else:
-                                    msg += f"▫️ 장 마감을 2분 앞두고 1층 앵커({layer_1_trigger:.2f}) 방어를 확인했습니다.\n"
-                                msg += f"▫️ 미체결 잔량 <b>{target_sweep_qty}주</b>를 시장 매수호가(${exec_price:.2f})로 전량 폭격하여 지층을 완벽하게 소각합니다! 🏆"
-                                await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
+                            # 락다운으로 인해 순수 매도 가능 잔량이 0이 된 경우 덤핑 스킵
+                            if target_sweep_qty > 0:
+                                bid_price = float(await asyncio.to_thread(broker.get_bid_price, t) or 0.0)
+                                exec_price = bid_price if bid_price > 0 else curr_p
                                 
-                                ccld_qty = 0
-                                for _ in range(4):
-                                    await asyncio.sleep(2.0)
-                                    execs = await asyncio.to_thread(broker.get_execution_history, t, today_str, today_str)
-                                    my_execs = [ex for ex in execs if ex.get('odno') == odno]
-                                    if my_execs:
-                                        ccld_qty = sum(int(float(ex.get('ft_ccld_qty') or 0)) for ex in my_execs)
-                                        if ccld_qty >= target_sweep_qty: break
-                                        
-                                if ccld_qty > 0:
-                                    strategy_rev.record_execution(t, "SELL", ccld_qty, exec_price)
-                                    queue_ledger.pop_lots(t, ccld_qty)
+                                res = broker.send_order(t, "SELL", target_sweep_qty, exec_price, "LIMIT")
+                                odno = res.get('odno', '')
+                                
+                                if res.get('rt_cd') == '0' and odno:
+                                    msg = f"🌪️ <b>[{t}] V-REV 본대 {sweep_type} 강제 청산 (Sweep Finisher) 발동!</b>\n"
+                                    if "잭팟" in sweep_type:
+                                        msg += f"▫️ 장 마감을 2분 앞두고 잭팟 커트라인({jackpot_trigger:.2f}) 돌파를 확인했습니다.\n"
+                                    else:
+                                        msg += f"▫️ 장 마감을 2분 앞두고 1층 앵커({layer_1_trigger:.2f}) 방어를 확인했습니다.\n"
+                                    msg += f"▫️ 매도 가능 잔량 <b>{target_sweep_qty}주</b>를 시장 매수호가(${exec_price:.2f})로 전량 폭격하여 지층을 소각합니다! 🏆"
+                                    await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
+                                    
+                                    ccld_qty = 0
+                                    for _ in range(4):
+                                        await asyncio.sleep(2.0)
+                                        execs = await asyncio.to_thread(broker.get_execution_history, t, today_str, today_str)
+                                        my_execs = [ex for ex in execs if ex.get('odno') == odno]
+                                        if my_execs:
+                                            ccld_qty = sum(int(float(ex.get('ft_ccld_qty') or 0)) for ex in my_execs)
+                                            if ccld_qty >= target_sweep_qty: break
+                                            
+                                    if ccld_qty > 0:
+                                        strategy_rev.record_execution(t, "SELL", ccld_qty, exec_price)
+                                        queue_ledger.pop_lots(t, ccld_qty)
+                            else:
+                                msg = f"⚠️ <b>[{t}] 스윕 피니셔 덤핑 생략 (MOC 락다운 감지)</b>\n▫️ 잭팟/1층 조건이 달성되었으나, 대상 물량이 수동 긴급 수혈(MOC) 등 취소 불가 상태로 미국 거래소에 묶여 있어 스윕 덤핑을 자동 스킵합니다."
+                                await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
                         
                         if target_sweep_qty > 0 or (total_q > 0 and curr_p >= jackpot_trigger):
                             continue 
@@ -498,7 +507,6 @@ async def scheduled_regular_trade(context):
                     
                     loc_orders = []
                     
-                    # MODIFIED: [V25.16 수학적 교정] 17:05 정규장 덫 1층 데이터 추출 팩트 교정 (날짜 기반 합산)
                     if q_data and safe_qty > 0:
                         dates_in_queue = sorted(list(set(item.get('date') for item in q_data if item.get('date'))), reverse=True)
                         l1_qty = 0

@@ -4,6 +4,7 @@
 # 모든 history() 호출에 timeout=5 파라미터 강제 주입 완료
 # 🚨 [V25.19 핫픽스] 토큰 만료 시간 타임존(Timezone) Naive/Aware 충돌 교정
 # 🚨 [V25.19 핫픽스] Windows 환경 임시 파일 권한(Permission) 락 충돌 방어 (shutil.move 도입)
+# 🚨 [V25.20 핫픽스] 잭팟 스윕 피니셔 디커플링 연산을 위한 ord_psbl_qty(순수 매도 가능 수량) 확장 이식
 # ==========================================================
 
 import requests
@@ -208,9 +209,11 @@ class KoreaInvestmentBroker:
                 for item in res_hold.get('output1', []):
                     ticker = item.get('ovrs_pdno')
                     qty = int(self._safe_float(item.get('ovrs_cblc_qty', 0)))
+                    # MODIFIED: [V25.20 핫픽스] 스윕 피니셔 디커플링 연산을 위해 '순수 매도 가능 잔량(ord_psbl_qty)' 추가 추출
+                    ord_psbl_qty = int(self._safe_float(item.get('ord_psbl_qty', qty)))
                     avg = self._safe_float(item.get('pchs_avg_pric', 0))
                     if qty > 0 and ticker not in holdings: 
-                        holdings[ticker] = {'qty': qty, 'avg': avg}
+                        holdings[ticker] = {'qty': qty, 'ord_psbl_qty': ord_psbl_qty, 'avg': avg}
         
         if api_success:
             return cash, holdings
@@ -300,7 +303,6 @@ class KoreaInvestmentBroker:
         except Exception as e:
             print(f"❌ [한투 API] 현재가 우회 조회 실패: {e}")
         return 0.0
-        
     def get_ask_price(self, ticker):
         try:
             excg_cd = self._get_exchange_code(ticker, target_api="PRICE")
@@ -364,6 +366,7 @@ class KoreaInvestmentBroker:
         except Exception as e:
             print(f"❌ [한투 API] 전일종가 우회 조회 실패: {e}")
         return 0.0
+
     def get_5day_ma(self, ticker):
         try:
             stock = yf.Ticker(ticker)
