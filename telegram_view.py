@@ -44,7 +44,7 @@ class TelegramView:
         dst_state = "🌞서머타임 ON" if target_hour == 17 else "❄️서머타임 OFF"
         
         msg = f"🌌 [ 인피니트 스노우볼 {latest_version} ]\n"
-        msg += "💠 2대 퀀트 코어 + AVWAP 하이브리드 엔진\n\n"
+        msg += "💠 2대 퀀트 코어 + AVWAP 하이브리드\n\n"
         
         msg += f"🕒 [ 운영 스케줄 ({dst_state}) ]\n"
         msg += "🔹 6시간 간격 : 🔑 API 토큰 자동 갱신\n"
@@ -56,7 +56,7 @@ class TelegramView:
         msg += "▶️ /sync : 📜 통합 지시서 조회\n"
         msg += "▶️ /record : 📊 장부 동기화 및 조회\n"
         msg += "▶️ /history : 🏆 졸업 명예의 전당\n"
-        msg += "▶️ /settlement : ⚙️ 코어 스위칭 / 전술 설정\n"
+        msg += "▶️ /settlement : ⚙️ 코어스위칭/전술설정\n"
         msg += "▶️ /seed : 💵 개별 시드머니 관리\n"
         msg += "▶️ /ticker : 🔄 운용 종목 선택\n"
         msg += "▶️ /mode : 🎯 상방 스나이퍼 ON/OFF\n"
