@@ -201,5 +201,8 @@ VERSION_HISTORY = [
     "V27.08 [2026.04.20] 🚨 [V14 오리지널 엣지 케이스 완벽 수술 (✨코파일럿 AI 합작)]: 리버스 모드 예산 0원 산출 시 런타임 붕괴(ZeroDivision) 원천 차단, 자전거래 방어막의 참조 오염(In-place Mutation) 오류 교정 및 명시적 Int 캐스팅을 통한 소수점 API Reject 맹점 전면 수리 (수정: strategy_v14)",
     "V27.09 [2026.04.21] 🚨 [Broker 코어 6대 치명적 맹점 전면 철거 (✨코파일럿 AI 합작)]: 토큰 만료 타임존(UTC/KST) 붕괴 교정, 프리/애프터마켓 유령 캔들 오염 방어, 마이너스 예수금 폭주 차단, 0주/0달러 API Reject 방어 가드 이식 및 토큰 갱신 실패 시 무한 루프(Silent Loop) 원천 봉쇄 (수정: broker)",
     "V27.10 [2026.04.22] 🚨 [Config 코어 그랜드 수술 (✨코파일럿 AI 합작)]: 에스크로 캐시 영구 박제(Ghost Escrow 방어), 액면분할 수학적 반올림(Banker's Rounding) 오류 교정 및 fsync 파일 무결성 확보 (수정: config)",
-    "V27.11 [2026.04.23] 🚨 [Main 관제탑 6대 맹점 전면 철거 (✨코파일럿 AI 합작)]: asyncio.Lock 런타임 붕괴 방어, ADMIN_CHAT_ID 누락 침묵(Zombie) 차단, NaN 오판 및 역방향 폴백 차단, 콜드 스타트 폭풍 제어(first=30) 및 통합 타임존(America/New_York) 파이프라인 구축 (수정: main)"
+    "V27.11 [2026.04.23] 🚨 [Main 관제탑 6대 맹점 전면 철거 (✨코파일럿 AI 합작)]: asyncio.Lock 런타임 붕괴 방어, ADMIN_CHAT_ID 누락 침묵(Zombie) 차단, NaN 오판 및 역방향 폴백 차단, 콜드 스타트 폭풍 제어(first=30) 및 통합 타임존(America/New_York) 파이프라인 구축 (수정: main)",
+    "V27.12 [2026.04.24] 🚨 [Scheduler Core 그랜드 수술 (✨코파일럿 AI 합작)]: 리버스 하드스탑 부등호 논리 반전(수익 시 탈출) 완벽 교정 및 비활성 종목의 누적일 오염(State Corruption) 원천 차단 (수정: scheduler_core)",
+    "V27.13 [2026.04.25] 🚨 [Scheduler Trade 전투 사령부 팩트 교정 (✨코파일럿 AI 합작)]: 0주 새출발 확정 매수(/ 0.935) 원본 100% 복구, all_success 딕셔너리 붕괴 차단, 상위 평단가 음수 오류 해결, V14 가격 기억상실 방어 및 스냅샷 은폐 사고(finally) 완전 봉쇄 (수정: scheduler_trade)",
+    "V27.14 [2026.04.26] 🚨 [Queue Ledger 장부 코어 그랜드 수술 (✨코파일럿 AI 합작)]: Atomic Write(장부 증발 방어), Thread Lock(동시접근 덮어쓰기 차단), 유령 로트(0주) 무한루프 소각, EST 타임존 병합 통일 및 백업 자가 치유(Self-Healing) 파이프라인 완벽 구축 (수정: queue_ledger)"
 ]

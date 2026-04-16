@@ -6,6 +6,7 @@
 # 🚨 [V25.02 수술] 리버스 모드 일일 1회 확정 탈출(TQQQ -15% / SOXL -20%) 엔진 팩트 이식
 # 🚨 [V25.19 핫픽스] 자정(Midnight) 래핑(Wrap-around) 시간 오차 수학적 교정
 # 🚨 [V25.19 핫픽스] 리버스 확정 탈출 시 무조건 누적(increment)되던 데드코드 분리 차단
+# 🚨 [V27.12 그랜드 수술] 코파일럿 합작 - 리버스 하드스탑 부등호 논리 반전(수익 시 탈출) 완벽 교정 및 비활성 종목의 누적일 오염(State Corruption) 원천 차단
 # ==========================================================
 import os
 import logging
@@ -47,18 +48,14 @@ def get_budget_allocation(cash, tickers, cfg):
     sorted_tickers = sorted(tickers, key=lambda x: 0 if x == "SOXL" else (1 if x == "TQQQ" else 2))
     allocated = {}
     
-    # 💡 [핵심 수술] API 결측치(None) 방어 및 순수 가용 예산(Free Cash) 도출
     safe_cash = float(cash) if cash is not None else 0.0
     
-    # 💡 [V24.10 수술] 동적 에스크로 락다운 (예산 이중 차감 방어)
     dynamic_total_locked = 0.0
     for tx in tickers:
         rev_state = cfg.get_reverse_state(tx)
         if rev_state.get("is_active", False):
-            # KIS 계좌에 LOC 지정가 등으로 묶였는지(Flag) 확인. getattr 방어.
             is_locked = getattr(cfg, 'get_order_locked', lambda x: False)(tx)
             if not is_locked:
-                # 주문이 안 들어간 경우에만 방어를 위해 봇 내부 차감 실행
                 dynamic_total_locked += float(cfg.get_escrow_cash(tx) or 0.0)
 
     free_cash = max(0.0, safe_cash - dynamic_total_locked)
@@ -67,7 +64,6 @@ def get_budget_allocation(cash, tickers, cfg):
         rev_state = cfg.get_reverse_state(tx)
         is_rev = rev_state.get("is_active", False)
         
-        # 본인 종목을 제외한 타 종목의 동적 잠금 예산 역산 앵커링
         other_locked = dynamic_total_locked
         if is_rev:
             is_locked = getattr(cfg, 'get_order_locked', lambda x: False)(tx)
@@ -75,7 +71,6 @@ def get_budget_allocation(cash, tickers, cfg):
                 other_locked -= float(cfg.get_escrow_cash(tx) or 0.0)
         
         if is_rev:
-            # 💡 [핵심 수술] 리버스 모드 종목은 공유 예산(rem_cash) 탈취를 금지하고 오직 자신의 에스크로만 락온
             my_escrow = float(cfg.get_escrow_cash(tx) or 0.0)
             allocated[tx] = my_escrow + other_locked
         else:
@@ -149,7 +144,6 @@ async def scheduled_token_check(context):
     logging.info(f"🔑 [API 토큰 갱신] 서버 동시 접속 부하 방지를 위해 {jitter_seconds}초 대기 후 발급을 시작합니다.")
     await asyncio.sleep(jitter_seconds)
     
-    # 💡 [수술 완료] 오타(tothread) 교정
     await asyncio.to_thread(context.job.data['broker']._get_access_token, force=True)
     logging.info("🔑 [API 토큰 갱신] 토큰 갱신이 안전하게 완료되었습니다.")
 
@@ -166,7 +160,6 @@ async def scheduled_force_reset(context):
     now_minutes = now.hour * 60 + now.minute
     target_minutes = target_hour * 60
     
-    # MODIFIED: [V25.19 핫픽스] 자정 래핑(Wrap-around) 오차 수학적 교정 (High 4)
     diff = min((now_minutes - target_minutes) % 1440, (target_minutes - now_minutes) % 1440)
     if diff > 2:
         return
@@ -184,7 +177,6 @@ async def scheduled_force_reset(context):
         
         cfg.reset_locks()
         
-        # 💡 [V24.10 수술] 17:00 매매 스케줄러 초기화 시 주문 상태 플래그 전면 해제
         for t in cfg.get_active_tickers():
             if hasattr(cfg, 'set_order_locked'):
                 cfg.set_order_locked(t, False)
@@ -200,8 +192,8 @@ async def scheduled_force_reset(context):
         for t in cfg.get_active_tickers():
             rev_state = cfg.get_reverse_state(t)
             
+            # 🚨 [수술 완료] 리버스 모드가 켜진(Active) 종목만 탈출 검사 및 누적일 카운팅 수행 (상태 오염 방지)
             if rev_state.get("is_active"):
-                # 💡 [핵심 수술] holdings 객체 내부 키 누락 및 None 캐스팅 방어
                 h_data = holdings.get(t) or {}
                 actual_avg = float(h_data.get('avg') or 0.0)
                 
@@ -211,10 +203,10 @@ async def scheduled_force_reset(context):
                 if curr_p > 0 and actual_avg > 0:
                     curr_ret = (curr_p - actual_avg) / actual_avg * 100.0
                     
-                    # 🚨 [V25.02 핵심 수술] 가변 exit_target 의존성 100% 적출 및 절대 하드스탑 팩트 이식
                     exit_threshold = -15.0 if t == "TQQQ" else -20.0
                     
-                    if curr_ret >= exit_threshold:
+                    # 🚨 [수술 완료] 하드스탑 탈출 부등호 논리 반전 교정 (손실이 임계치보다 크거나 같을 때 탈출)
+                    if curr_ret <= exit_threshold:
                         cfg.set_reverse_state(t, False, 0, 0.0)
                         cfg.clear_escrow_cash(t)
                         
@@ -227,14 +219,15 @@ async def scheduled_force_reset(context):
                         if changed:
                             cfg._save_json(cfg.FILES["LEDGER"], ledger_data)
                             
-                        msg_addons += f"\n🌤️ <b>[{t}] 리버스 확정 탈출 조건 달성 (수익률: {curr_ret:.2f}% >= 기준: {exit_threshold}%)!</b>\n▫️ 격리 병동을 즉시 폐쇄하고 V14 본대로 완벽히 복귀했습니다."
-                    # MODIFIED: [V25.19 핫픽스] 탈출 성공 시 무조건 누적되던 데드코드 방어 (High 5)
+                        msg_addons += f"\n🚨 <b>[{t}] 하드스탑 확정 탈출 발동 (수익률: {curr_ret:.2f}% <= 기준: {exit_threshold}%)!</b>\n▫️ 격리 병동을 즉시 폐쇄하고 V14 본대로 완벽히 복귀했습니다."
                     else:
+                        # 하드스탑에 도달하지 않았으므로 누적일 정상 카운팅
                         cfg.increment_reverse_day(t)
                 else:
+                    # 가격을 못 불러와도 리버스 모드이므로 누적일은 카운팅
                     cfg.increment_reverse_day(t)
-            else:
-                cfg.increment_reverse_day(t)
+            
+            # 🚨 [수술 완료] 리버스 모드가 아닌 정상 종목은 else 블록을 완전히 삭제하여 누적일 오염 원천 차단
                 
         final_msg = f"🔓 <b>[{target_hour}:00] 시스템 일일 초기화 완료 (매매 잠금 해제 & 팩트 스캔)</b>" + msg_addons
         await context.bot.send_message(chat_id=chat_id, text=final_msg, parse_mode='HTML')
