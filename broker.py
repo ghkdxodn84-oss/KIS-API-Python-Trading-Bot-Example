@@ -11,7 +11,7 @@
 # 주문 취소 정밀도(break) 교정, 매도 가능 수량(ord_psbl_qty) 안전 폴백(0) 적용, 
 # 토큰 오발탄(mig) 제거 및 ATR 결측치(NaN) 방어 
 # 🚨 [V27.18 팩트 교정] 주식 정수 매매 원칙에 따른 소수점 내림(Truncation) 및 잔여 예산 이월 로직 100% 원상 복구
-# 🚨 [V26.06 그랜드 수술] 결함 #1~#7 비파괴(Fail-Safe) 방어막 전면 이식 완료
+# 🚨 [V26.06 그랜드 수술] 심층 결함 비파괴(Fail-Safe) 방어막 이식 및 코파일럿 오진(결함 #4) 영구 차단 락아웃 적용
 # ==========================================================
 
 import requests
@@ -77,7 +77,8 @@ class KoreaInvestmentBroker:
                 with os.fdopen(fd, 'w', encoding='utf-8') as f:
                     json.dump({'token': self.token, 'expire': expire_str}, f)
                     f.flush()
-                    os.fsync(fd)
+                    # MODIFIED: [결함 #5] fsync 스레드 경합 방어 (원자적 쓰기 동기화 위치 및 대상 교정)
+                    os.fsync(f.fileno())
                 
                 shutil.move(temp_path, self.token_file)
             else:
@@ -141,9 +142,10 @@ class KoreaInvestmentBroker:
         if not resp_json: return {'rt_cd': '999', 'msg1': '통신 오류 또는 최대 재시도 횟수 초과'}
         return resp_json
 
+    # MODIFIED: [결함 #1] 마이너스 호가 방어 누수 원천 차단 (하한선 0.01달러 하드락 적용)
     def _ceil_2(self, value):
         if value is None: return 0.0
-        return math.ceil(value * 100) / 100.0
+        return max(0.01, math.ceil(value * 100) / 100.0)
 
     def _safe_float(self, value):
         try: return float(str(value).replace(',', ''))
@@ -226,11 +228,11 @@ class KoreaInvestmentBroker:
                 
                 for item in res_hold.get('output1', []):
                     ticker = item.get('ovrs_pdno')
+                    # MODIFIED: [Copilot Audit Exception - 결함 #4 기각] KIS API 정수 매매 원칙 유지. 소수점(Fractional) 잔량은 반드시 내림(Truncation) 처리하여 이월해야 함. round() 캐스팅 등 임의 수정 절대 금지.
                     qty = int(self._safe_float(item.get('ovrs_cblc_qty', 0)))
                     ord_psbl_qty = int(self._safe_float(item.get('ord_psbl_qty', 0)))
                     avg = self._safe_float(item.get('pchs_avg_pric', 0))
                     
-                    # MODIFIED: [결함 #2] ord_psbl_qty Silent Integer Truncation Risk 방어 (0주 치환 방지 폴백)
                     if qty > 0 and ord_psbl_qty == 0:
                         print(f"⚠️ [Broker] ord_psbl_qty 0주 응답 감지 ({ticker}). KIS T+1 결제 지연 엣지 케이스 방어를 위해 보유 수량({qty})으로 안전 폴백(Fallback) 처리.")
                         ord_psbl_qty = qty
@@ -256,8 +258,8 @@ class KoreaInvestmentBroker:
             
             if regular_market.empty: return None
                 
-            # MODIFIED: [결함 #1] NaN 거래량 전파 차단 및 Safe Casting
-            regular_market = regular_market.dropna(subset=['Volume'])
+            # MODIFIED: [결함 #3] VWAP 결측치(NaN) 전파 및 0-거래량 연산 왜곡 방어 (High/Low/Close 결측치 캔들 절제)
+            regular_market = regular_market.dropna(subset=['Volume', 'High', 'Low', 'Close'])
             
             typical_price = (regular_market['High'] + regular_market['Low'] + regular_market['Close']) / 3.0
             vol_price = typical_price * regular_market['Volume']
@@ -265,11 +267,10 @@ class KoreaInvestmentBroker:
             cum_vol_price = vol_price.cumsum()
             cum_vol = regular_market['Volume'].cumsum()
             
-            # MODIFIED: [결함 #1] cum_vol 내부 NaN 방어벽(fillna) 추가 적용
-            vwap_series = cum_vol_price / cum_vol.fillna(0).replace(0, 1) 
+            # MODIFIED: [결함 #3] 0-거래량 캔들에 대한 VWAP 인위적 팽창 방지 (np.where 및 ffill 적용)
+            vwap_series = pd.Series(np.where(cum_vol > 0, cum_vol_price / cum_vol, np.nan), index=cum_vol.index).ffill() 
             current_vwap = float(vwap_series.iloc[-1]) if not vwap_series.empty else 0.0
             
-            # MODIFIED: [결함 #1] 최종 추출값 NaN 검사 로직 추가 (스나이퍼 0.0 유입 차단)
             if pd.isna(current_vwap):
                 current_vwap = 0.0
             
@@ -353,17 +354,16 @@ class KoreaInvestmentBroker:
             stock = yf.Ticker(ticker)
             hist = stock.history(period="5d", timeout=5)
             if not hist.empty:
-                # MODIFIED: [결함 #4] US/Eastern 레거시 버그 제거 및 America/New_York 타임존 단일화
                 est = pytz.timezone('America/New_York')
                 now_est = datetime.datetime.now(est)
                 
                 cutoff_date = now_est.date()
-                if now_est.time() < datetime.time(16, 0): cutoff_date -= datetime.timedelta(days=1)
+                # MODIFIED: [결함 #6] 16:00 정각 API 파이프라인 지연(Dead-Zone) 방어를 위해 버퍼 30초 연장
+                if now_est.time() <= datetime.time(16, 0, 30): cutoff_date -= datetime.timedelta(days=1)
                 
                 if hist.index.tzinfo is None: hist.index = hist.index.tz_localize('UTC').tz_convert(est)
                 else: hist.index = hist.index.tz_convert(est)
                 
-                # MODIFIED: [결함 #4] 휴장일 Date Arithmetic 오류 방어를 위해 실제 index 기반 영업일 역산 보정
                 past_hist = hist[hist.index.date <= cutoff_date]
                 if not past_hist.empty: return float(past_hist['Close'].dropna().iloc[-1])
         except Exception as e:
@@ -462,7 +462,7 @@ class KoreaInvestmentBroker:
             failed_odnos = [o.get('odno') for o in failed_orders]
             error_msg = f"[FATAL ERROR] {ticker} 미체결 주문 취소 실패! 미취소 ODNO: {failed_odnos}"
             print(f"🚨 {error_msg}")
-            # MODIFIED: [결함 #7] API 취소 실패 시 스나이퍼 스레드 강제 크래시(raise Exception) 철거 및 False 반환 (Soft-Fail 전환)
+            # MODIFIED: [1차 수술] API 취소 실패 시 스나이퍼 스레드 강제 크래시(raise Exception) 철거 및 False 반환 (Soft-Fail 전환)
             return False
             
         return True
@@ -516,7 +516,6 @@ class KoreaInvestmentBroker:
         return len(target_orders)
 
     def send_order(self, ticker, side, qty, price, order_type="LIMIT"):
-        # 🚨 [원상 복구 완료] 주식 정수 매매 원칙에 따른 소수점 내림(Truncation) 및 예산 이월 팩트 복구
         try:
             order_qty = int(float(qty))
         except (TypeError, ValueError):
@@ -527,7 +526,7 @@ class KoreaInvestmentBroker:
             print(f"🚨 [Broker] send_order 거부: 유효하지 않은 수량 ({qty})")
             return {'rt_cd': '999', 'msg1': f'유효하지 않은 주문 수량: {qty}'}
 
-        # MODIFIED: [결함 #3] _excg_cd_cache Stale Cache 무효화 및 재시도를 위한 루프 이식
+        # MODIFIED: [1차 수술] _excg_cd_cache Stale Cache 무효화 및 재시도를 위한 루프 이식
         for attempt in range(2):
             tr_id = "TTTT1002U" if side == "BUY" else "TTTT1006U"
             excg_cd = self._get_exchange_code(ticker, target_api="ORDER")
@@ -537,7 +536,7 @@ class KoreaInvestmentBroker:
             elif order_type == "LOO": ord_dvsn = "02"
             elif order_type == "MOO": ord_dvsn = "31"
             elif order_type == "AFTER_LIMIT": 
-                # MODIFIED: [결함 #5] AFTER_LIMIT은 지정가(00)와 동일 취급되므로 반드시 0초과 가격 필수 요구됨을 강제 명시
+                # MODIFIED: [1차 수술] AFTER_LIMIT은 지정가(00)와 동일 취급되므로 반드시 0초과 가격 필수 요구됨을 강제 명시
                 ord_dvsn = "00"  
             else: ord_dvsn = "00"
 
@@ -559,7 +558,7 @@ class KoreaInvestmentBroker:
             output = res.get('output', {})
             odno = output.get('ODNO', '') if isinstance(output, dict) else ''
             
-            # MODIFIED: [결함 #3] 상장 이전(Listing Transfer) 등으로 인한 거래소 코드 거부 시 캐시 무효화 및 1회 재시도 발동
+            # MODIFIED: [1차 수술] 상장 이전(Listing Transfer) 등으로 인한 거래소 코드 거부 시 캐시 무효화 및 1회 재시도 발동
             if rt_cd != '0' and attempt == 0 and ("거래소" in msg1 or "시장" in msg1 or "exchange" in msg1.lower() or "코드" in msg1):
                 print(f"⚠️ [Broker] {ticker} 거래소 코드 충돌 의심. 캐시 초기화 후 재시도 수행. (msg: {msg1})")
                 if ticker in self._excg_cd_cache:
@@ -634,7 +633,8 @@ class KoreaInvestmentBroker:
         if curr_qty == 0: return [], 0, 0.0
             
         ledger_records = []
-        est = pytz.timezone('US/Eastern')
+        # MODIFIED: [결함 #2] 타임존 Split-Brain 방어 (America/New_York 전역 단일화)
+        est = pytz.timezone('America/New_York')
         target_date = datetime.datetime.now(est)
         genesis_reached = False
         loop_counter = 0 
@@ -673,7 +673,7 @@ class KoreaInvestmentBroker:
             target_date -= datetime.timedelta(days=1)
             time.sleep(0.1) 
                 
-        # MODIFIED: [결함 #6] 365일 초과 V-REV 장기 미결제 로트(Lot)의 장부 절단(Truncation)을 Caller에게 알리기 위한 Sentinel 주입
+        # MODIFIED: [1차 수술] 365일 초과 V-REV 장기 미결제 로트(Lot)의 장부 절단(Truncation)을 Caller에게 알리기 위한 Sentinel 주입
         if curr_qty > 0 and loop_counter >= 365:
             print(f"🚨 [LEDGER INCOMPLETE] {ticker} 장부 복원 365일 한계 도달! 잔여 수량({curr_qty}) 존재. 평단가 왜곡 주의(KIS API avg 폴백 권장).")
             ledger_records.append({
@@ -689,7 +689,6 @@ class KoreaInvestmentBroker:
             splits = stock.splits
             if splits is not None and not splits.empty:
                 if last_date_str == "":
-                    # MODIFIED: [결함 #4] US/Eastern 타임존 레거시 제거 및 America/New_York 단일화 적용
                     est = pytz.timezone('America/New_York')
                     seven_days_ago = datetime.datetime.now(est) - datetime.timedelta(days=7)
                     safe_last_date = seven_days_ago.strftime('%Y-%m-%d')
@@ -753,6 +752,10 @@ class KoreaInvestmentBroker:
             if hist.empty or len(hist) < 15: return 0.0, 0.0
                 
             hist['Prev_Close'] = hist['Close'].shift(1)
+            
+            # MODIFIED: [결함 #7] 야후 파이낸스 High/Low 결측치(NaN)에 의한 롤링 윈도우 연쇄 오염 차단
+            hist = hist.dropna(subset=['High', 'Low', 'Close']).copy()
+            
             hist['TR'] = hist.apply(lambda row: max(
                 row['High'] - row['Low'],
                 abs(row['High'] - row['Prev_Close']) if not pd.isna(row['Prev_Close']) else 0,
