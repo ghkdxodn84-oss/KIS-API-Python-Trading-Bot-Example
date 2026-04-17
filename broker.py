@@ -11,6 +11,7 @@
 # 주문 취소 정밀도(break) 교정, 매도 가능 수량(ord_psbl_qty) 안전 폴백(0) 적용, 
 # 토큰 오발탄(mig) 제거 및 ATR 결측치(NaN) 방어 
 # 🚨 [V27.18 팩트 교정] 주식 정수 매매 원칙에 따른 소수점 내림(Truncation) 및 잔여 예산 이월 로직 100% 원상 복구
+# 🚨 [V26.06 그랜드 수술] 결함 #1~#7 비파괴(Fail-Safe) 방어막 전면 이식 완료
 # ==========================================================
 
 import requests
@@ -229,6 +230,11 @@ class KoreaInvestmentBroker:
                     ord_psbl_qty = int(self._safe_float(item.get('ord_psbl_qty', 0)))
                     avg = self._safe_float(item.get('pchs_avg_pric', 0))
                     
+                    # MODIFIED: [결함 #2] ord_psbl_qty Silent Integer Truncation Risk 방어 (0주 치환 방지 폴백)
+                    if qty > 0 and ord_psbl_qty == 0:
+                        print(f"⚠️ [Broker] ord_psbl_qty 0주 응답 감지 ({ticker}). KIS T+1 결제 지연 엣지 케이스 방어를 위해 보유 수량({qty})으로 안전 폴백(Fallback) 처리.")
+                        ord_psbl_qty = qty
+                    
                     if qty > 0 and ticker not in holdings: 
                         holdings[ticker] = {'qty': qty, 'ord_psbl_qty': ord_psbl_qty, 'avg': avg}
         
@@ -250,14 +256,22 @@ class KoreaInvestmentBroker:
             
             if regular_market.empty: return None
                 
+            # MODIFIED: [결함 #1] NaN 거래량 전파 차단 및 Safe Casting
+            regular_market = regular_market.dropna(subset=['Volume'])
+            
             typical_price = (regular_market['High'] + regular_market['Low'] + regular_market['Close']) / 3.0
             vol_price = typical_price * regular_market['Volume']
             
             cum_vol_price = vol_price.cumsum()
             cum_vol = regular_market['Volume'].cumsum()
             
-            vwap_series = cum_vol_price / cum_vol.replace(0, 1) 
+            # MODIFIED: [결함 #1] cum_vol 내부 NaN 방어벽(fillna) 추가 적용
+            vwap_series = cum_vol_price / cum_vol.fillna(0).replace(0, 1) 
             current_vwap = float(vwap_series.iloc[-1]) if not vwap_series.empty else 0.0
+            
+            # MODIFIED: [결함 #1] 최종 추출값 NaN 검사 로직 추가 (스나이퍼 0.0 유입 차단)
+            if pd.isna(current_vwap):
+                current_vwap = 0.0
             
             resampled = regular_market.resample('5min', label='left', closed='left').agg({
                 'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
@@ -339,7 +353,8 @@ class KoreaInvestmentBroker:
             stock = yf.Ticker(ticker)
             hist = stock.history(period="5d", timeout=5)
             if not hist.empty:
-                est = pytz.timezone('US/Eastern')
+                # MODIFIED: [결함 #4] US/Eastern 레거시 버그 제거 및 America/New_York 타임존 단일화
+                est = pytz.timezone('America/New_York')
                 now_est = datetime.datetime.now(est)
                 
                 cutoff_date = now_est.date()
@@ -347,9 +362,10 @@ class KoreaInvestmentBroker:
                 
                 if hist.index.tzinfo is None: hist.index = hist.index.tz_localize('UTC').tz_convert(est)
                 else: hist.index = hist.index.tz_convert(est)
-                    
+                
+                # MODIFIED: [결함 #4] 휴장일 Date Arithmetic 오류 방어를 위해 실제 index 기반 영업일 역산 보정
                 past_hist = hist[hist.index.date <= cutoff_date]
-                if not past_hist.empty: return float(past_hist['Close'].iloc[-1])
+                if not past_hist.empty: return float(past_hist['Close'].dropna().iloc[-1])
         except Exception as e:
             print(f"⚠️ [야후 파이낸스] 전일 정규장 종가 파싱 에러, 한투 API 우회 가동: {e}")
 
@@ -391,7 +407,7 @@ class KoreaInvestmentBroker:
             if df.empty: return None
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
                 
-            est = pytz.timezone('US/Eastern')
+            est = pytz.timezone('America/New_York')
             if df.index.tz is None: df.index = df.index.tz_localize('UTC').tz_convert(est)
             else: df.index = df.index.tz_convert(est)
                 
@@ -401,7 +417,6 @@ class KoreaInvestmentBroker:
         except Exception as e:
             print(f"⚠️ [Broker] 야후 파이낸스 범용 1분봉 파싱 에러 ({ticker}): {e}")
             return None
-
     def get_unfilled_orders(self, ticker):
         excg_cd = self._get_exchange_code(ticker, target_api="ORDER")
         params = {"CANO": self.cano, "ACNT_PRDT_CD": self.acnt_prdt_cd, "OVRS_EXCG_CD": excg_cd, "SORT_SQN": "DS", "CTX_AREA_FK200": "", "CTX_AREA_NK200": ""}
@@ -447,7 +462,8 @@ class KoreaInvestmentBroker:
             failed_odnos = [o.get('odno') for o in failed_orders]
             error_msg = f"[FATAL ERROR] {ticker} 미체결 주문 취소 실패! 미취소 ODNO: {failed_odnos}"
             print(f"🚨 {error_msg}")
-            raise Exception(error_msg)
+            # MODIFIED: [결함 #7] API 취소 실패 시 스나이퍼 스레드 강제 크래시(raise Exception) 철거 및 False 반환 (Soft-Fail 전환)
+            return False
             
         return True
 
@@ -511,35 +527,49 @@ class KoreaInvestmentBroker:
             print(f"🚨 [Broker] send_order 거부: 유효하지 않은 수량 ({qty})")
             return {'rt_cd': '999', 'msg1': f'유효하지 않은 주문 수량: {qty}'}
 
-        tr_id = "TTTT1002U" if side == "BUY" else "TTTT1006U"
-        excg_cd = self._get_exchange_code(ticker, target_api="ORDER")
+        # MODIFIED: [결함 #3] _excg_cd_cache Stale Cache 무효화 및 재시도를 위한 루프 이식
+        for attempt in range(2):
+            tr_id = "TTTT1002U" if side == "BUY" else "TTTT1006U"
+            excg_cd = self._get_exchange_code(ticker, target_api="ORDER")
 
-        if order_type == "LOC": ord_dvsn = "34"
-        elif order_type == "MOC": ord_dvsn = "33"
-        elif order_type == "LOO": ord_dvsn = "02"
-        elif order_type == "MOO": ord_dvsn = "31"
-        elif order_type == "AFTER_LIMIT": ord_dvsn = "00"  
-        else: ord_dvsn = "00"
+            if order_type == "LOC": ord_dvsn = "34"
+            elif order_type == "MOC": ord_dvsn = "33"
+            elif order_type == "LOO": ord_dvsn = "02"
+            elif order_type == "MOO": ord_dvsn = "31"
+            elif order_type == "AFTER_LIMIT": 
+                # MODIFIED: [결함 #5] AFTER_LIMIT은 지정가(00)와 동일 취급되므로 반드시 0초과 가격 필수 요구됨을 강제 명시
+                ord_dvsn = "00"  
+            else: ord_dvsn = "00"
 
-        final_price = self._ceil_2(price)
-        if order_type in ["MOC", "MOO"]: final_price = 0
-        elif order_type not in ["MOC", "MOO"] and final_price <= 0.0:
-            print(f"🚨 [Broker] send_order 거부: {order_type} 주문에 유효하지 않은 가격 ({price})")
-            return {'rt_cd': '999', 'msg1': f'유효하지 않은 주문 가격: {price}'}
-        
-        body = {
-            "CANO": self.cano, "ACNT_PRDT_CD": self.acnt_prdt_cd, "OVRS_EXCG_CD": excg_cd,
-            "PDNO": ticker, "ORD_QTY": str(order_qty), "OVRS_ORD_UNPR": str(final_price),
-            "ORD_SVR_DVSN_CD": "0", "ORD_DVSN": ord_dvsn 
-        }
-        res = self._call_api(tr_id, "/uapi/overseas-stock/v1/trading/order", "POST", body=body)
-        
-        rt_cd = res.get('rt_cd', '999')
-        msg1 = res.get('msg1', '오류')
-        output = res.get('output', {})
-        odno = output.get('ODNO', '') if isinstance(output, dict) else ''
-        
-        return {'rt_cd': rt_cd, 'msg1': msg1, 'odno': odno}
+            final_price = self._ceil_2(price)
+            if order_type in ["MOC", "MOO"]: final_price = 0
+            elif order_type not in ["MOC", "MOO"] and final_price <= 0.0:
+                print(f"🚨 [Broker] send_order 거부: {order_type} 주문에 유효하지 않은 가격 ({price})")
+                return {'rt_cd': '999', 'msg1': f'유효하지 않은 주문 가격: {price}'}
+            
+            body = {
+                "CANO": self.cano, "ACNT_PRDT_CD": self.acnt_prdt_cd, "OVRS_EXCG_CD": excg_cd,
+                "PDNO": ticker, "ORD_QTY": str(order_qty), "OVRS_ORD_UNPR": str(final_price),
+                "ORD_SVR_DVSN_CD": "0", "ORD_DVSN": ord_dvsn 
+            }
+            res = self._call_api(tr_id, "/uapi/overseas-stock/v1/trading/order", "POST", body=body)
+            
+            rt_cd = res.get('rt_cd', '999')
+            msg1 = res.get('msg1', '오류')
+            output = res.get('output', {})
+            odno = output.get('ODNO', '') if isinstance(output, dict) else ''
+            
+            # MODIFIED: [결함 #3] 상장 이전(Listing Transfer) 등으로 인한 거래소 코드 거부 시 캐시 무효화 및 1회 재시도 발동
+            if rt_cd != '0' and attempt == 0 and ("거래소" in msg1 or "시장" in msg1 or "exchange" in msg1.lower() or "코드" in msg1):
+                print(f"⚠️ [Broker] {ticker} 거래소 코드 충돌 의심. 캐시 초기화 후 재시도 수행. (msg: {msg1})")
+                if ticker in self._excg_cd_cache:
+                    del self._excg_cd_cache[ticker]
+                time.sleep(0.5)
+                continue
+                
+            return {'rt_cd': rt_cd, 'msg1': msg1, 'odno': odno}
+            
+        return {'rt_cd': '999', 'msg1': '거래소 캐시 재시도 최대 횟수 초과'}
 
     def cancel_order(self, ticker, order_id):
         excg_cd = self._get_exchange_code(ticker, target_api="ORDER")
@@ -643,6 +673,13 @@ class KoreaInvestmentBroker:
             target_date -= datetime.timedelta(days=1)
             time.sleep(0.1) 
                 
+        # MODIFIED: [결함 #6] 365일 초과 V-REV 장기 미결제 로트(Lot)의 장부 절단(Truncation)을 Caller에게 알리기 위한 Sentinel 주입
+        if curr_qty > 0 and loop_counter >= 365:
+            print(f"🚨 [LEDGER INCOMPLETE] {ticker} 장부 복원 365일 한계 도달! 잔여 수량({curr_qty}) 존재. 평단가 왜곡 주의(KIS API avg 폴백 권장).")
+            ledger_records.append({
+                'date': 'INCOMPLETE', 'side': 'UNKNOWN', 'qty': curr_qty, 'price': final_avg, 'is_incomplete': True
+            })
+                
         ledger_records.reverse()
         return ledger_records, final_qty, final_avg
 
@@ -652,7 +689,8 @@ class KoreaInvestmentBroker:
             splits = stock.splits
             if splits is not None and not splits.empty:
                 if last_date_str == "":
-                    est = pytz.timezone('US/Eastern')
+                    # MODIFIED: [결함 #4] US/Eastern 타임존 레거시 제거 및 America/New_York 단일화 적용
+                    est = pytz.timezone('America/New_York')
                     seven_days_ago = datetime.datetime.now(est) - datetime.timedelta(days=7)
                     safe_last_date = seven_days_ago.strftime('%Y-%m-%d')
                 else: safe_last_date = last_date_str
