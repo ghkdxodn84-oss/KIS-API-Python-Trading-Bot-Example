@@ -30,6 +30,8 @@ class ReversionStrategy:
         }
         self.executed = {"BUY_BUDGET": {}, "SELL_QTY": {}}
         self.state_loaded = {}
+        # NEW: [was_holding 영속화] 서버 재시작 후 플래그 증발 방어 — 인메모리 저장소 선언
+        self.was_holding = {}
         
         self.U_CURVE_WEIGHTS = [
             0.0252, 0.0213, 0.0192, 0.0210, 0.0189, 0.0187, 0.0228, 0.0203, 0.0200, 0.0209,
@@ -60,6 +62,8 @@ class ReversionStrategy:
                     for k in self.executed.keys():
                         raw_val = data.get("executed", {}).get(k, 0)
                         self.executed[k][ticker] = int(raw_val) if k == "SELL_QTY" else float(raw_val)
+                    # NEW: [was_holding 영속화] 서버 재시작 후 플래그 복원 — 파일에서 로드
+                    self.was_holding[ticker] = bool(data.get("was_holding", False))
                     self.state_loaded[ticker] = today_str
                     return
             except Exception:
@@ -69,6 +73,8 @@ class ReversionStrategy:
             self.residual[k][ticker] = 0.0
         self.executed["BUY_BUDGET"][ticker] = 0.0
         self.executed["SELL_QTY"][ticker] = 0
+        # NEW: [was_holding 영속화] 초기 파일 부재 시 기본값 False로 안전 초기화
+        self.was_holding[ticker] = False
         self.state_loaded[ticker] = today_str
 
     def _save_state(self, ticker):
@@ -80,7 +86,9 @@ class ReversionStrategy:
             "executed": {
                 "BUY_BUDGET": float(self.executed.get("BUY_BUDGET", {}).get(ticker, 0.0)),
                 "SELL_QTY": int(self.executed.get("SELL_QTY", {}).get(ticker, 0))
-            }
+            },
+            # NEW: [was_holding 영속화] 서버 재시작 후 플래그 복원이 가능하도록 JSON 파일 저장
+            "was_holding": bool(self.was_holding.get(ticker, False))
         }
         temp_path = None
         try:
@@ -166,6 +174,7 @@ class ReversionStrategy:
         else:
             self.executed["SELL_QTY"][ticker] = int(self.executed.get("SELL_QTY", {}).get(ticker, 0)) + safe_qty
         self._save_state(ticker)
+
     def get_dynamic_plan(self, ticker, curr_p, prev_c, current_weight, vwap_status, min_idx, alloc_cash, q_data, is_snapshot_mode=False):
         if not is_snapshot_mode:
             cached_plan = self.load_daily_snapshot(ticker)

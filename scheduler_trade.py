@@ -19,6 +19,7 @@
 # 🚀 [V28.01 핫픽스] 정규장 스케줄러 타임 윈도우 15분 확장 (APScheduler 지연 붕괴 원천 차단)
 # 🚀 [V28.02 그랜드 수술] 코파일럿 엣지 케이스 3대 결함(DST 데드락 65분 확장, prev_c 결측 텔레그램 타전, tx_lock 콜드스타트 가드) 전면 수술 완료
 # 🚀 [V28.03 그랜드 수술] 엣지 케이스 4대 결함(이중 매도 방지, 클램핑 수학 모순 교정, 큐 증발 폴백, 잠금 스킵 타전) 및 UX 렌더링 충돌 교정 완비
+# 🚀 [V28.04 그랜드 수술] VWAP 엔진 내 prev_c 앵커(Lock-on) 고정 및 was_holding 영속성 듀얼 캐싱 방어막 이식 완비
 # ==========================================================
 import os
 import logging
@@ -297,7 +298,16 @@ async def scheduled_vwap_trade(context):
                             continue
 
                     curr_p = float(await asyncio.to_thread(broker.get_current_price, t) or 0.0)
-                    prev_c = float(await asyncio.to_thread(broker.get_previous_close, t) or 0.0)
+                    
+                    # NEW: [prev_c 앵커 고정 Lock-on] 당일 VWAP 최초 구동 시 1회만 API 호출하여 캐싱.
+                    # 이후 매 분 재조회 시 16:00 경계 Yahoo Finance 캐시 오염으로 앵커가 변동되는 위험 원천 차단.
+                    # API 실패(0 반환) 시에는 캐시에 저장하지 않고 다음 분에 재시도(prev_c <= 0 가드로 해당 분 skip).
+                    if not vwap_cache.get(f"REV_{t}_anchor_prev_c"):
+                        prev_c_live = float(await asyncio.to_thread(broker.get_previous_close, t) or 0.0)
+                        if prev_c_live > 0:
+                            vwap_cache[f"REV_{t}_anchor_prev_c"] = prev_c_live
+                    prev_c = float(vwap_cache.get(f"REV_{t}_anchor_prev_c") or 0.0)
+
                     if curr_p <= 0 or prev_c <= 0: continue
 
                     if version == "V_REV":
@@ -312,11 +322,21 @@ async def scheduled_vwap_trade(context):
                         is_zero_start = (cached_plan and cached_plan.get("total_q", -1) == 0)
                         virtual_q_data = [] if is_zero_start else q_data
                         
-                        if vwap_cache.get(f"REV_{t}_was_holding", False) and total_q == 0:
+                        # NEW: [was_holding 영속화 연동] 인메모리 vwap_cache와 strategy_rev 파일 기반 플래그를 OR 결합하여
+                        # 서버 재시작 후 vwap_cache가 초기화되어도 JSON에서 복원된 값으로 유령 매수 차단
+                        strategy_rev._load_state_if_needed(t)
+                        held_in_cache = vwap_cache.get(f"REV_{t}_was_holding", False)
+                        held_in_file = strategy_rev.was_holding.get(t, False)
+                        if (held_in_cache or held_in_file) and total_q == 0:
                             continue
                             
                         if total_q > 0:
+                            # NEW: [was_holding 영속화 연동] 인메모리 플래그와 파일 플래그를 함께 설정.
+                            # False→True 전환 시에만 _save_state를 호출하여 매 분 불필요한 fsync I/O 차단.
                             vwap_cache[f"REV_{t}_was_holding"] = True
+                            if not strategy_rev.was_holding.get(t, False):
+                                strategy_rev.was_holding[t] = True
+                                strategy_rev._save_state(t)
                             
                         if total_q > 0:
                             avg_price = sum(item.get("qty", 0) * item.get("price", 0.0) for item in q_data) / total_q
