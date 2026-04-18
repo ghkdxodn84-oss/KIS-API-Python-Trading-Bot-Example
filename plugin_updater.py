@@ -1,15 +1,16 @@
 # ==========================================================
 # [plugin_updater.py]
-# ⚠️ 자가 업데이트 및 GCP 데몬 제어 전용 플러그인
+# ⚠️ 자가 업데이트 및 프로세스 제어 전용 플러그인 (수정본)
 # 💡 깃허브 원격 저장소 강제 동기화 (git fetch & reset --hard)
-# 💡 OS 레벨 데몬 재가동 제어 (sudo systemctl restart)
-# 🚨 [V27.00 핫픽스] 사용자별 데몬 이름(DAEMON_NAME) .env 동적 로드 이식 완료
-# 🛡️ [V27.05 추가] 업데이트 직전 stable_backup 폴더로 롤백용 안전띠 결속 기능 탑재
+# 💡 OS 독립적인 자가 재시작(os.execv) 및 데몬 롤백 제어 탑재
+# 🚨 [수술 완료] systemctl 권한 문제 회피 및 메모리 100% 초기화 재시작 이식
+# 🛡️ 업데이트 직전 stable_backup 폴더로 롤백용 안전띠 결속 기능 탑재
 # ==========================================================
 import logging
 import asyncio
 import subprocess
 import os
+import sys
 from dotenv import load_dotenv
 
 class SystemUpdater:
@@ -83,19 +84,24 @@ class SystemUpdater:
 
     def restart_daemon(self):
         """
-        GCP 리눅스 OS에 데몬 재가동 명령을 하달합니다.
-        격발 즉시 봇 프로세스가 SIGTERM 신호를 받고 종료되므로,
-        반드시 텔레그램 보고 메시지를 선행 발송한 후 호출해야 합니다.
+        [수술 완료] 프로그램을 확실하게 끄고 새로운 코드로 다시 시작하는 마법의 주문입니다.
         """
         try:
-            logging.info(f"🔄 [Updater] OS 쉘에 {self.daemon_name} 데몬 재가동 명령을 하달합니다.")
+            logging.info("🔄 [Updater] os.execv를 활용하여 현재 프로세스를 완전히 새로운 코드로 교체합니다.")
             
-            subprocess.Popen(
-                ["sudo", "systemctl", "restart", self.daemon_name],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
+            # 파이썬(sys.executable)에게 현재 실행 중인 파일(sys.argv)을 "새로고침"해서 열라고 명령합니다.
+            os.execv(sys.executable, [sys.executable] + sys.argv)
             return True
+            
         except Exception as e:
-            logging.error(f"🚨 [Updater] 데몬 재가동 명령 하달 실패: {e}")
-            return False
+            logging.error(f"🚨 [Updater] 자가 재시작 실패, 예비 플랜(systemctl)을 가동합니다: {e}")
+            try:
+                subprocess.Popen(
+                    ["sudo", "systemctl", "restart", self.daemon_name],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                return True
+            except Exception as ex:
+                logging.error(f"🚨 [Updater] 데몬 재가동 명령 하달 최종 실패: {ex}")
+                return False
