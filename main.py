@@ -11,6 +11,7 @@
 # 🚨 [V27.11 그랜드 수술] 코파일럿 합작 - asyncio.Lock 런타임 붕괴 방어, NaN 오판 및 역방향 폴백 차단, 
 # 콜드 스타트 폭풍 제어(first=30) 및 통합 타임존(America/New_York) 파이프라인 구축
 # 🚨 [V27.12 핫픽스] 사계절 타임존 이중 타격 원천 차단, 이중 동기화 붕괴 방지 및 FD 최적화 이식
+# MODIFIED: [V28.27 그랜드 수술] 로그 파일명 생성 시 KST(서버 시간) 의존성 전면 소각 및 EST(미국 동부) 타임존 락온으로 디버깅 파편화 영구 차단
 # ==========================================================
 
 import os
@@ -78,7 +79,10 @@ if not all([TELEGRAM_TOKEN, APP_KEY, APP_SECRET, CANO, ADMIN_CHAT_ID]):
     print("❌ [치명적 오류] .env 파일에 봇 구동 필수 키(TELEGRAM_TOKEN, APP_KEY, APP_SECRET, CANO, ADMIN_CHAT_ID)가 누락되었습니다. 봇을 종료합니다.")
     exit(1)
 
-log_filename = f"logs/bot_app_{datetime.datetime.now().strftime('%Y%m%d')}.log"
+# 🚨 [V28.27 수술 완료] 로그 파일명 타임존 EST 락온
+est_tz_log = pytz.timezone('US/Eastern')
+log_filename = f"logs/bot_app_{datetime.datetime.now(est_tz_log).strftime('%Y%m%d')}.log"
+
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
     level=logging.INFO,

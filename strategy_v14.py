@@ -7,12 +7,16 @@
 #    텔레그램 지시서 조회 시 박제된 스냅샷을 우선 반환하도록 디커플링 배선 완비.
 #    (이로써 장중 매수/매도 체결 시 지시서 타점이 실시간으로 뒤틀려
 #    공수가 교대되는 하극상 엣지 케이스를 원천 차단함)
+# MODIFIED: [V28.26 타임 패러독스 완벽 방어 수술]
+# 서버 시간(KST/UTC) 의존성 100% 소각. 모든 스냅샷 및 쿼터 익절 캐싱 날짜를 
+# 미국 동부시간(US/Eastern)으로 락온하여 자정 경계 환각 및 더블샷 버그 원천 차단.
 # ==========================================================
 import math
 import os
 import json
 import tempfile
 from datetime import datetime
+import pytz  # NEW: [V28.26] 타임존 고정을 위한 라이브러리 추가
 
 class V14Strategy:
     def __init__(self, config):
@@ -23,7 +27,8 @@ class V14Strategy:
 
     # NEW: [V28.17 스냅샷 엔진 이식] V14 오리지널 모드 스냅샷 저장(Lock-on) 로직
     def save_daily_snapshot(self, ticker, plan_data):
-        today_str = datetime.now().strftime("%Y-%m-%d")
+        # MODIFIED: [V28.26] KST/UTC 의존성 제거 및 EST/EDT 락온
+        today_str = datetime.now(pytz.timezone('US/Eastern')).strftime("%Y-%m-%d")
         snap_file = f"data/daily_snapshot_V14_{ticker}.json"
         
         # 🚨 [치명적 경고 1 준수] 세션 간 오염 방지: 당일 날짜로 단 1회만 멱등성 박제
@@ -55,7 +60,8 @@ class V14Strategy:
 
     # NEW: [V28.17 스냅샷 엔진 이식] V14 오리지널 모드 스냅샷 로드(Decoupling) 로직
     def load_daily_snapshot(self, ticker):
-        today_str = datetime.now().strftime("%Y-%m-%d")
+        # MODIFIED: [V28.26] KST/UTC 의존성 제거 및 EST/EDT 락온
+        today_str = datetime.now(pytz.timezone('US/Eastern')).strftime("%Y-%m-%d")
         snap_file = f"data/daily_snapshot_V14_{ticker}.json"
         if os.path.exists(snap_file):
             try:
@@ -69,7 +75,8 @@ class V14Strategy:
 
     def _mark_quarter_sell_completed(self, ticker):
         flag_file = f"cache_sniper_sell_{ticker}.json"
-        today_str = datetime.now().strftime("%Y-%m-%d")
+        # MODIFIED: [V28.26] KST/UTC 의존성 제거 및 EST/EDT 락온
+        today_str = datetime.now(pytz.timezone('US/Eastern')).strftime("%Y-%m-%d")
         
         if os.path.exists(flag_file):
             try:

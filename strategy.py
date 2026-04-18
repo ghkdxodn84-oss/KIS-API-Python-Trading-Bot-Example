@@ -7,13 +7,13 @@
 # 🚨 [V25.19 핫픽스] 레거시 모드 감지 시 로컬 version 변수 미업데이트 맹점 팩트 교정
 # 🚀 [V26.02 핵심 수술] V14 오리지널 모드 내 LOC/VWAP 집행 방식 이원화 라우팅 탑재
 # 🚀 [V26.07 확정 순수익 렌더링 패치] V-REV 메모리 스냅샷 수수료(0.5%) 완벽 차감 이식
+# MODIFIED: [V28.25 그랜드 수술] V-REV 메모리 스냅샷에 동적 수수료 팩트 역산 엔진 이식 완료
 # ==========================================================
 import logging
 import pandas as pd
 from strategy_v14 import V14Strategy
 from strategy_v_avwap import VAvwapHybridPlugin  
 from strategy_reversion import ReversionStrategy
-# NEW: [V26.02] V14 VWAP 분할 타격 엔진 플러그인 임포트
 from strategy_v14_vwap import V14VwapStrategy
 
 class InfiniteStrategy:
@@ -22,12 +22,8 @@ class InfiniteStrategy:
         self.v14_plugin = V14Strategy(config)
         self.v_avwap_plugin = VAvwapHybridPlugin()
         self.v_rev_plugin = ReversionStrategy()
-        # NEW: [V26.02] V14 VWAP 플러그인 인스턴스화
         self.v14_vwap_plugin = V14VwapStrategy(config)
 
-    # ==========================================================
-    # 🛡️ VWAP 시장 미시구조 거래량 지배력 코어 엔진 (60% 상향)
-    # ==========================================================
     def analyze_vwap_dominance(self, df):
         if df is None or len(df) < 10:
             return {"vwap_price": 0.0, "is_strong_up": False, "is_strong_down": False}
@@ -83,9 +79,6 @@ class InfiniteStrategy:
         except Exception as e:
             return {"vwap_price": 0.0, "is_strong_up": False, "is_strong_down": False}
 
-    # ==========================================================
-    # 🎯 중앙 라우팅 엔진 (Dynamic Routing)
-    # ==========================================================
     def get_plan(self, ticker, current_price, avg_price, qty, prev_close, ma_5day=0.0, market_type="REG", available_cash=0, is_simulation=False, vwap_status=None):
         version = self.cfg.get_version(ticker)
         
@@ -94,55 +87,36 @@ class InfiniteStrategy:
             self.cfg.set_version(ticker, "V14")
             version = "V14"
 
-        # MODIFIED: [V26.02] V14 오리지널 모드 내에서 VWAP 방식 선택 시 전용 플러그인으로 라우팅
         is_vwap_enabled = getattr(self.cfg, 'get_manual_vwap_mode', lambda x: False)(ticker)
         if version == "V14" and is_vwap_enabled:
             return self.v14_vwap_plugin.get_plan(
-                ticker=ticker,
-                current_price=current_price,
-                avg_price=avg_price,
-                qty=qty,
-                prev_close=prev_close,
-                ma_5day=ma_5day,
-                market_type=market_type,
-                available_cash=available_cash,
-                is_simulation=is_simulation
+                ticker=ticker, current_price=current_price, avg_price=avg_price, qty=qty,
+                prev_close=prev_close, ma_5day=ma_5day, market_type=market_type,
+                available_cash=available_cash, is_simulation=is_simulation
             )
 
         if version == "V_REV":
             return {
-                'core_orders': [],
-                'bonus_orders': [],
-                'orders': [],
-                't_val': 0.0,
-                'is_reverse': False,
-                'star_price': 0.0,
-                'one_portion': 0.0
+                'core_orders': [], 'bonus_orders': [], 'orders': [],
+                't_val': 0.0, 'is_reverse': False, 'star_price': 0.0, 'one_portion': 0.0
             }
 
-        # 일반 무한매수법(V14-LOC)인 경우
         return self.v14_plugin.get_plan(
-            ticker=ticker,
-            current_price=current_price,
-            avg_price=avg_price,
-            qty=qty,
-            prev_close=prev_close,
-            ma_5day=ma_5day,
-            market_type=market_type,
-            available_cash=available_cash,
-            is_simulation=is_simulation,
-            vwap_status=vwap_status
+            ticker=ticker, current_price=current_price, avg_price=avg_price, qty=qty,
+            prev_close=prev_close, ma_5day=ma_5day, market_type=market_type,
+            available_cash=available_cash, is_simulation=is_simulation, vwap_status=vwap_status
         )
 
-    # MODIFIED: [V26.07 확정 순수익 렌더링 패치] 한투 OpenAPI 왕복 수수료(0.5%) 팩트 차감 로직 이식
+    # MODIFIED: [V28.25] V-REV 메모리 스냅샷에 동적 수수료 팩트 역산 로직 이식
     def capture_vrev_snapshot(self, ticker, clear_price, avg_price, qty):
         if qty <= 0: return None
         
         raw_total_buy = avg_price * qty
         raw_total_sell = clear_price * qty
         
-        net_invested = raw_total_buy * 1.0025
-        net_revenue = raw_total_sell * 0.9975
+        fee_rate = self.cfg.get_fee(ticker) / 100.0
+        net_invested = raw_total_buy * (1.0 + fee_rate)
+        net_revenue = raw_total_sell * (1.0 - fee_rate)
         
         realized_pnl = net_revenue - net_invested
         realized_pnl_pct = (realized_pnl / net_invested) * 100 if net_invested > 0 else 0.0

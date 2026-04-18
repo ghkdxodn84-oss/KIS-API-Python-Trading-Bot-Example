@@ -7,6 +7,10 @@
 # MODIFIED: [V28.18 UX 팩트 패치] 0주 락온 시 자기 자신의 모드(동일 모드) 서브메뉴 진입 허용 렌더링 완료
 # MODIFIED: [V28.19 그랜드 수술] KIS API 가짜 0주(Phantom 0-Share) 응답 맹점 원천 차단. 
 # holdings None Safe-Casting 쉴드 이식 및 V14 장부 + V-REV 큐 다이렉트 I/O를 결합한 삼중 교차 검증(Triple Verification) 방어막 최종 탑재 완료
+# MODIFIED: [V28.22 스냅샷 렌더링 디커플링 수술] 졸업 카드 발급(HIST:IMG) 시 
+# 콜백 데이터에 고유 식별자(ID)가 존재할 경우 해당 과거 지층(History)을 
+# 100% 정밀 타격하여 렌더링하도록 팩트 라우팅 엔진 이식.
+# MODIFIED: [V28.25 그랜드 수술] 동적 수수료율 설정을 위한 INPUT:FEE 콜백 라우팅 분기 신설 완료.
 # ==========================================================
 import logging
 import datetime
@@ -30,14 +34,10 @@ class TelegramCallbacks:
         self.view = view
         self.tx_lock = tx_lock
 
-    # NEW: [V28.19 삼중 교차 검증(Triple Verification)] KIS API 부분 실패(가짜 0주) 방어를 위해
-    # V14 장부(config.get_ledger)와 V-REV 큐(data/queue_ledger.json)를 KIS 잔고와 함께
-    # 크로스체크하여 MAX 수량을 반환하는 팩트 스캐너.
     def _get_max_holdings_qty(self, ticker, kis_qty):
         v14_qty = 0
         vrev_qty = 0
         
-        # 1. V14 장부 순수량(Net Qty) 검증
         try:
             ledger = self.cfg.get_ledger()
             net = 0
@@ -49,7 +49,6 @@ class TelegramCallbacks:
         except Exception:
             pass
 
-        # 2. V-REV 큐 장부 지층 수량 검증 (다이렉트 파일 I/O 강제)
         try:
             q_file = "data/queue_ledger.json"
             if os.path.exists(q_file):
@@ -59,7 +58,6 @@ class TelegramCallbacks:
         except Exception:
             pass
 
-        # 3. KIS 실잔고, V14 잔고, V-REV 잔고 중 가장 큰 값(MAX) 도출
         return max(kis_qty, v14_qty, vrev_qty)
 
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE, controller):
@@ -187,7 +185,6 @@ class TelegramCallbacks:
                 if action == "DEL_Q":
                     new_q = [item for item in ticker_q if item.get('date') != target_date]
                     
-                    # 🚨 [AI 에이전트 절대 주의 - 환각 방어막] 다이렉트 파일 I/O 강제 (객체 참조 금지)
                     all_q[ticker] = new_q
                     os.makedirs(os.path.dirname(q_file), exist_ok=True)
                     with open(q_file, 'w', encoding='utf-8') as f:
@@ -319,28 +316,41 @@ class TelegramCallbacks:
                             t_rec['side'] = 'BUY'
                             
                     qty, avg, invested, sold = self.cfg.calculate_holdings(target['ticker'], safe_trades)
-                    msg, markup = self.view.create_ledger_dashboard(target['ticker'], qty, avg, invested, sold, safe_trades, 0, 0, is_history=True)
+                    
+                    try:
+                        msg, markup = self.view.create_ledger_dashboard(target['ticker'], qty, avg, invested, sold, safe_trades, 0, 0, is_history=True, history_id=hid)
+                    except TypeError:
+                        msg, markup = self.view.create_ledger_dashboard(target['ticker'], qty, avg, invested, sold, safe_trades, 0, 0, is_history=True)
+                        
                     await query.edit_message_text(msg, reply_markup=markup, parse_mode='HTML')
             elif sub == "LIST":
                 await controller.cmd_history(update, context)
             elif sub == "IMG":
                 ticker = data[2]
+                
+                target_id = int(data[3]) if len(data) > 3 else None
+                
                 hist_list = [h for h in self.cfg.get_history() if h['ticker'] == ticker]
                 
                 if not hist_list:
                     await context.bot.send_message(update.effective_chat.id, f"📭 <b>[{ticker}]</b> 발급 가능한 졸업 기록이 존재하지 않습니다.", parse_mode='HTML')
                     return
                 
-                latest_hist = sorted(hist_list, key=lambda x: x.get('end_date', ''), reverse=True)[0]
+                target_hist = None
+                if target_id:
+                    target_hist = next((h for h in hist_list if h.get('id') == target_id), None)
+                    
+                if not target_hist:
+                    target_hist = sorted(hist_list, key=lambda x: x.get('end_date', ''), reverse=True)[0]
                 
                 try:
                     img_path = self.view.create_profit_image(
-                        ticker=latest_hist['ticker'],
-                        profit=latest_hist['profit'],
-                        yield_pct=latest_hist['yield'],
-                        invested=latest_hist['invested'],
-                        revenue=latest_hist['revenue'],
-                        end_date=latest_hist['end_date']
+                        ticker=target_hist['ticker'],
+                        profit=target_hist['profit'],
+                        yield_pct=target_hist['yield'],
+                        invested=target_hist['invested'],
+                        revenue=target_hist['revenue'],
+                        end_date=target_hist['end_date']
                     )
                     if os.path.exists(img_path):
                         with open(img_path, 'rb') as f_out:
@@ -362,7 +372,6 @@ class TelegramCallbacks:
             
             await query.edit_message_text(f"🚀 {t} 수동 강제 전송 시작 (교차 분리)...")
             
-            # 🚨 [AI 에이전트 절대 주의 - 환각 방어막] API 잔고 응답 뻥튀기 중복 합산 방어를 위해 broker.py 내부 멱등성 가드를 유지하고, 여기서 무분별하게 조작하지 말 것.
             async with self.tx_lock:
                 cash, holdings = self.broker.get_account_balance()
                 
@@ -536,11 +545,6 @@ class TelegramCallbacks:
             ticker = data[2]
             current_ver = self.cfg.get_version(ticker)
             
-            # 🚨 [AI 에이전트 절대 주의 - 환각(Hallucination) 방어막]
-            # 엣지 케이스 역사 영구 박제:
-            # 1) holdings=None (KIS API 전체 실패) → qty=0 오판 허용 가능성. Safe-Casting 쉴드로 즉시 차단.
-            # 2) KIS API 부분 실패 (가짜 0주): NASD/AMEX 응답 누락 시 qty=0 오판.
-            #    V14 장부와 V-REV 큐를 추가 스캔하는 삼중 교차 검증(Triple Verification)으로 원천 차단.
             async with self.tx_lock:
                 _, holdings = self.broker.get_account_balance()
                 
@@ -551,7 +555,6 @@ class TelegramCallbacks:
             kis_qty = int(float(holdings.get(ticker, {}).get('qty', 0)))
             max_qty = self._get_max_holdings_qty(ticker, kis_qty)
             
-            # MODIFIED: [V28.19] 삼중 교차 검증 기반 락온 및 동일 모드 서브메뉴 진입 허용
             if max_qty > 0 and current_ver != new_ver:
                 msg = f"🚨 <b>[ 퀀트 모드 전환 강제 차단 ]</b>\n\n"
                 msg += f"현재 <b>[{ticker}] {max_qty}주</b>를 보유 중입니다. (삼중 교차 검증)\n"
@@ -589,11 +592,6 @@ class TelegramCallbacks:
             
             target_ver = "V_REV" if mode_type in ["AUTO", "MANUAL"] else "V14"
 
-            # 🚨 [AI 에이전트 절대 주의 - 환각(Hallucination) 방어막]
-            # 엣지 케이스 역사 영구 박제 (SET_VER와 동일한 삼중 방어선):
-            # 1) holdings=None (KIS API 전체 실패) → qty=0 오판 허용 가능성. Safe-Casting 쉴드로 즉시 차단.
-            # 2) KIS API 부분 실패 (가짜 0주): NASD/AMEX 응답 누락 시 qty=0 오판.
-            #    V14 장부와 V-REV 큐를 추가 스캔하는 삼중 교차 검증(Triple Verification)으로 원천 차단.
             async with self.tx_lock:
                 _, holdings = self.broker.get_account_balance()
                 
@@ -604,7 +602,6 @@ class TelegramCallbacks:
             kis_qty = int(float(holdings.get(ticker, {}).get('qty', 0)))
             max_qty = self._get_max_holdings_qty(ticker, kis_qty)
             
-            # MODIFIED: [V28.19] 삼중 교차 검증 기반 락온 및 동일 모드 서브메뉴 진입 허용
             if max_qty > 0 and current_ver != target_ver:
                 msg = f"🚨 <b>[ 퀀트 모드 전환 강제 차단 ]</b>\n\n"
                 msg += f"현재 <b>[{ticker}] {max_qty}주</b>를 보유 중입니다. (삼중 교차 검증)\n"
@@ -692,6 +689,9 @@ class TelegramCallbacks:
                 ko_name = "자동 복리율(%)"
             elif sub == "STOCK_SPLIT":
                 ko_name = "액면 분할/병합 비율 (예: 10분할은 10, 10병합은 0.1)"
+            # NEW: [V28.25] 텔레그램 수수료 텍스트 입력 프롬프트 동적 출력
+            elif sub == "FEE":
+                ko_name = "증권사 수수료율(%)"
             else:
                 ko_name = "값"
             

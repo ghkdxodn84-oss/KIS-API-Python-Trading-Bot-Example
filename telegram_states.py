@@ -4,6 +4,8 @@
 # QueueLedger 객체 의존성(AttributeError) 전면 철거. 
 # 복잡한 클래스를 거치지 않고 data/queue_ledger.json 파일을 직접 열어 
 # 덮어쓰는 순수 다이렉트 파일 I/O(Direct File I/O) 우회망 완벽 이식.
+# MODIFIED: [V28.25 동적 수수료율 텍스트 입력 라우터 수술] 
+# 사용자가 텔레그램 창에 입력한 수수료(%)를 파싱하여 config에 저장하는 CONF_FEE 상태 처리 로직 완벽 이식.
 # ==========================================================
 # NEW: [리팩토링 2단계] 유저 텍스트 입력 및 상태 기계(State Machine) 독립 클래스 분리
 import logging
@@ -83,11 +85,6 @@ class TelegramStates:
                         return await update.message.reply_text(f"🚨 <b>팻핑거 방어 가동:</b> 입력가(${price:.2f})가 현재가(${curr_p:.2f}) 대비 ±30%를 초과합니다. 다시 시도해주세요.", parse_mode='HTML')
                 except Exception:
                     pass
-# ==========================================================
-# [telegram_states.py] - 🌟 100% 통합 완성본 🌟 (Part 2)
-# ==========================================================
-
-# ... (앞선 1부 코드의 EDITQ_ 분기 try 문 끝부분에 이어집니다) ...
 
                 q_file = "data/queue_ledger.json"
                 all_q = {}
@@ -105,16 +102,12 @@ class TelegramStates:
                         item['price'] = price
                         break
                 
-                # MODIFIED: [V28.13 장부 텍스트 수정 런타임 에러 완전 소각]
-                # 객체 의존성(self.queue_ledger.queues)을 100% 영구 적출하고,
-                # 파일 직접 입출력(File I/O)으로 장부를 덮어써서 런타임 붕괴를 원천 차단함.
                 all_q[ticker] = ticker_q
                 
                 os.makedirs(os.path.dirname(q_file), exist_ok=True)
                 with open(q_file, 'w', encoding='utf-8') as f:
                     json.dump(all_q, f, ensure_ascii=False, indent=4)
                 
-                # 메모리에 떠있는 큐 장부 캐시가 있다면 리로드(동기화) 시도
                 if getattr(self, 'queue_ledger', None) and hasattr(self.queue_ledger, '_load'):
                     try:
                         self.queue_ledger._load()
@@ -169,6 +162,15 @@ class TelegramStates:
                 ticker = parts[2]
                 self.cfg.set_compound_rate(ticker, val)
                 await update.message.reply_text(f"✅ [{ticker}] 졸업 시 자동 복리율: {val}%")
+
+            # NEW: [V28.25] 사용자가 입력한 수수료율 처리 라우터
+            elif state.startswith("CONF_FEE"):
+                if val < 0.0 or val > 10.0:
+                    return await update.message.reply_text("🚨 <b>오입력 차단:</b> 수수료율은 0.0% ~ 10.0% 사이여야 합니다.", parse_mode='HTML')
+                    
+                ticker = parts[2]
+                self.cfg.set_fee(ticker, val)
+                await update.message.reply_text(f"💳 <b>[{ticker}] 증권사 거래 수수료: {val}% 적용 완료!</b>\n▫️ 다음 명예의 전당 정산부터 수익 연산 시 해당 수수료가 적용됩니다.", parse_mode='HTML')
                 
             elif state.startswith("CONF_STOCK_SPLIT"):
                 if val <= 0:

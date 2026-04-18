@@ -10,6 +10,9 @@
 #    유연한 동적 번호 부여(Pop1, Pop2...) 파싱 아키텍처 이식.
 # 5) [3차 보완] V-REV 잭팟 타점 실시간 변이 방어를 위해 actual_avg 대신
 #    스냅샷에 박제된 avg_price 앵커 최우선 적용.
+# MODIFIED: [V28.22 스냅샷 렌더링 디커플링 수술] 졸업 카드 목록에서 
+# 과거 내역을 조회할 때, 해당 내역의 고유 식별자(ID)를 뷰 엔진으로 
+# 100% 전달하도록 라우팅 배선(history_id=hid) 교정 완료.
 # ==========================================================
 import logging
 import datetime
@@ -413,7 +416,6 @@ class TelegramController:
                             sell_idx += 1
                             
                     if not is_manual_vwap:
-                        # MODIFIED: [3차 보완] 잭팟 타점 연산 시 실시간 actual_avg 오염을 방어하고 스냅샷 avg_price를 최우선 적용
                         snap_avg = cached_snap.get('avg_price', actual_avg)
                         target_jackpot = round(snap_avg * 1.01, 2)
                         v_rev_guidance += f" 🎯 [전체 잭팟] ${target_jackpot:.2f} 돌파 시 <b>{logic_qty}주</b> (옵션)\n"

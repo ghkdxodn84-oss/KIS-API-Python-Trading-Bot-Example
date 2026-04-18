@@ -9,6 +9,7 @@
 # 🚀 [V26.07 확정 순수익 렌더링 패치] 명예의 전당 및 졸업 카드 발급 시 한투 OpenAPI 왕복 수수료(0.5%) 완벽 차감 이식
 # 🚨 [V27.10 그랜드 수술] 에스크로 캐시 영구 박제(Ghost Escrow 방어), 액면분할 수학적 반올림(Banker's Rounding) 오류 교정 및 fsync 무결성 확보
 # 🚨 [V27.11 핫픽스] I/O FD 누수 방어, TOCTOU 경쟁 상태 원천 차단 래퍼 추가
+# MODIFIED: [V28.25 그랜드 수술] 수수료 하드코딩 전면 소각 및 동적 수수료(Fee) 설정 엔진 탑재
 # ==========================================================
 import json
 import os
@@ -52,7 +53,8 @@ class ConfigManager:
             "SNIPER_MULTIPLIER_CFG": "data/sniper_multiplier.json",
             "SPLIT_HISTORY": "data/split_history.json",
             "AVWAP_HYBRID_CFG": "data/avwap_hybrid.json",
-            "MANUAL_VWAP_CFG": "data/manual_vwap_config.json"
+            "MANUAL_VWAP_CFG": "data/manual_vwap_config.json",
+            "FEE_CFG": "data/fee_config.json" # NEW: 동적 수수료 저장소 추가
         }
         
         self.DEFAULT_SEED = {"SOXL": 6720.0, "TQQQ": 6720.0}
@@ -60,15 +62,12 @@ class ConfigManager:
         self.DEFAULT_TARGET = {"SOXL": 12.0, "TQQQ": 10.0}
         self.DEFAULT_VERSION = {"SOXL": "V14", "TQQQ": "V14"}
         self.DEFAULT_COMPOUND = {"SOXL": 70.0, "TQQQ": 70.0}
-        
         self.DEFAULT_SNIPER_MULTIPLIER = {"SOXL": 1.0, "TQQQ": 0.9}
+        self.DEFAULT_FEE = {"SOXL": 0.25, "TQQQ": 0.25} # NEW: 기본 수수료 0.25%
         
         self._escrow_cache = {}
-
-        # NEW: 다중 스레드 간 상태 경합(TOCTOU)을 방어하기 위한 인메모리 프로세스 락
         self._locks_mutex = threading.Lock()
 
-    # NEW: 장부 및 LOCKS 파일 갱신 시 원자적 읽기-수정-쓰기(RMW)를 보장하는 래퍼 함수
     def _atomic_update_locks(self, update_fn):
         with self._locks_mutex:
             lock_file_path = self.FILES["LOCKS"]
@@ -102,7 +101,6 @@ class ConfigManager:
                 return default if default is not None else {}
         return default if default is not None else {}
 
-    # MODIFIED: FD 누수 방어(EMFILE 충돌 차단) 및 mkstemp 경로(dir="") 에러 방어
     def _save_json(self, filename, data):
         fd = None
         temp_path = None
@@ -113,7 +111,7 @@ class ConfigManager:
                 
             fd, temp_path = tempfile.mkstemp(dir=dir_name, text=True)
             with os.fdopen(fd, 'w', encoding='utf-8') as f:
-                fd = None  # os.fdopen이 fd의 소유권을 획득했으므로 직접 닫기 방지
+                fd = None
                 json.dump(data, f, ensure_ascii=False, indent=2)
                 f.flush()         
                 os.fsync(f.fileno()) 
@@ -138,7 +136,6 @@ class ConfigManager:
                 print(f"⚠️ [Config] 파일 로드 에러 ({filename}): {e}")
         return default
 
-    # MODIFIED: FD 누수 방어 및 mkstemp 경로 에러 방어 적용
     def _save_file(self, filename, content):
         fd = None
         temp_path = None
@@ -195,21 +192,18 @@ class ConfigManager:
                     break
         return max(0.0, float(escrow))
 
-    # MODIFIED: TOCTOU 경합 방어를 위해 원자적 업데이트 래퍼(_atomic_update_locks) 적용
     def set_escrow_cash(self, ticker, amount):
         validated = max(0.0, float(amount))
         def _update(locks):
             locks[f"ESCROW_{ticker}"] = validated
         self._atomic_update_locks(_update)
 
-    # MODIFIED: TOCTOU 경합 방어를 위해 원자적 업데이트 래퍼 적용
     def add_escrow_cash(self, ticker, amount):
         def _update(locks):
             current = locks.get(f"ESCROW_{ticker}", 0.0)
             locks[f"ESCROW_{ticker}"] = max(0.0, current + float(amount))
         self._atomic_update_locks(_update)
 
-    # MODIFIED: TOCTOU 경합 방어를 위해 원자적 업데이트 래퍼 적용
     def clear_escrow_cash(self, ticker):
         def _update(locks):
             if f"ESCROW_{ticker}" in locks:
@@ -233,7 +227,6 @@ class ConfigManager:
         locks = self._load_json(self.FILES["LOCKS"], {})
         return locks.get(f"ORDER_LOCKED_{ticker}", False)
 
-    # MODIFIED: TOCTOU 경합 방어를 위해 원자적 업데이트 래퍼 적용
     def set_order_locked(self, ticker, is_locked):
         def _update(locks):
             if is_locked:
@@ -243,7 +236,6 @@ class ConfigManager:
                     del locks[f"ORDER_LOCKED_{ticker}"]
         self._atomic_update_locks(_update)
 
-    # MODIFIED: TOCTOU 경합 방어를 위해 원자적 업데이트 래퍼 적용
     def set_lock(self, ticker, market_type):
         est = pytz.timezone('US/Eastern')
         today = datetime.datetime.now(est).strftime('%Y-%m-%d')
@@ -251,7 +243,6 @@ class ConfigManager:
             locks[f"{today}_{ticker}_{market_type}"] = True
         self._atomic_update_locks(_update)
 
-    # MODIFIED: TOCTOU 경합 방어를 위해 원자적 업데이트 래퍼 적용
     def reset_locks(self):
         def _update(locks):
             keys_to_keep = [k for k in locks.keys() if k.startswith("ESCROW_") or k.startswith("ORDER_LOCKED_")]
@@ -260,7 +251,6 @@ class ConfigManager:
             locks.update(surviving_locks)
         self._atomic_update_locks(_update)
         
-    # MODIFIED: TOCTOU 경합 방어를 위해 원자적 업데이트 래퍼 적용
     def reset_lock_for_ticker(self, ticker):
         est = pytz.timezone('US/Eastern')
         today = datetime.datetime.now(est).strftime('%Y-%m-%d')
@@ -282,13 +272,13 @@ class ConfigManager:
         one_portion = seed / split if split > 0 else 1
         t_val = (actual_qty * actual_avg_price) / one_portion if one_portion > 0 else 0.0
         return round(t_val, 4), one_portion
+
     def apply_stock_split(self, ticker, ratio):
         if ratio <= 0: return
         ledger = self.get_ledger()
         changed = False
         for r in ledger:
             if r.get('ticker') == ticker:
-                # 🚨 [수술 완료] Banker's Rounding 소수점 증발 오류 교정 (사사오입 강제 적용)
                 raw_new_qty = r['qty'] * ratio
                 new_qty = math.floor(raw_new_qty + 0.5)
                 r['qty'] = new_qty if new_qty > 0 else (1 if r['qty'] > 0 else 0)
@@ -438,14 +428,12 @@ class ConfigManager:
         self.set_reverse_state(ticker, False, 0, 0.0)
         self.clear_escrow_cash(ticker)
 
-    # MODIFIED: 잔여 물량의 정확한 평단가(Running weighted-average) 산출을 위해 단순 전체 매수합산 역산 폴백 로직 교체
     def calculate_holdings(self, ticker, records=None):
         if records is None:
             records = self.get_ledger()
         target_recs = [r for r in records if r['ticker'] == ticker]
         total_qty, total_invested, total_sold = 0, 0.0, 0.0    
         
-        # NEW: 순차적 차감 평단가(Running Cost) 추적 변수
         running_qty = 0
         running_cost = 0.0
 
@@ -459,7 +447,6 @@ class ConfigManager:
                 total_qty -= r['qty']
                 total_sold += (r['price'] * r['qty'])
                 if running_qty > 0:
-                    # 익절된 수량만큼 현재 평단가 비율에 따라 비용 풀에서 차감
                     cost_per_share = running_cost / running_qty
                     running_cost -= cost_per_share * min(r['qty'], running_qty)
                     running_qty = max(0, running_qty - r['qty'])
@@ -472,7 +459,6 @@ class ConfigManager:
         if total_qty > 0 and target_recs:
             avg_price = float(target_recs[-1].get('avg_price', 0.0))
             if avg_price == 0.0:
-                # MODIFIED: 전체 매수 평단가가 아닌 잔여 물량 기준 평단가 반영
                 avg_price = (running_cost / running_qty) if running_qty > 0 else 0.0
         
         return total_qty, avg_price, invested_up, sold_up
@@ -568,7 +554,6 @@ class ConfigManager:
             
         return max(0.0, round(t_val, 4)), max(0.0, current_budget), max(0.0, rem_cash)
 
-    # MODIFIED: 가상 매도 레코드 삽입 이전에 확정된 실현 수익(PnL)을 선 계산하여 영구 박제되는 런타임 오류 방어
     def archive_graduation(self, ticker, end_date, prev_close=0.0):
         ledger = self.get_ledger()
         target_recs = [r for r in ledger if r['ticker'] == ticker]
@@ -577,7 +562,6 @@ class ConfigManager:
         
         ledger_qty, avg_price, _, _ = self.calculate_holdings(ticker, target_recs)
         
-        # NEW: 합성 레코드 삽입 전 원장 기반 순수 손익 스냅샷 획득
         raw_total_buy = sum(r['price']*r['qty'] for r in target_recs if r['side']=='BUY')
         raw_total_sell = sum(r['price']*r['qty'] for r in target_recs if r['side']=='SELL')
 
@@ -615,9 +599,10 @@ class ConfigManager:
 
             self._save_json(self.FILES["LEDGER"], ledger)
 
-        # MODIFIED: 위에서 캐싱한 raw_total 스냅샷을 활용하여 PnL 연산
-        net_invested = raw_total_buy * 1.0025
-        net_revenue = raw_total_sell * 0.9975
+        # MODIFIED: [V28.25] V14 졸업 연산 시 동적 수수료 팩트 역산 적용
+        fee_rate = self.get_fee(ticker) / 100.0
+        net_invested = raw_total_buy * (1.0 + fee_rate)
+        net_revenue = raw_total_sell * (1.0 - fee_rate)
         
         profit = math.ceil((net_revenue - net_invested) * 100) / 100.0
         yield_pct = math.ceil(((profit / net_invested * 100) if net_invested > 0 else 0.0) * 100) / 100.0
@@ -681,6 +666,14 @@ class ConfigManager:
     def get_split_count(self, t): return self._load_json(self.FILES["SPLIT"], self.DEFAULT_SPLIT).get(t, 40.0)
     def get_target_profit(self, t): return self._load_json(self.FILES["PROFIT_CFG"], self.DEFAULT_TARGET).get(t, 10.0)
         
+    # NEW: [V28.25] 동적 수수료율 Getter/Setter 엔진 이식
+    def get_fee(self, t): 
+        return float(self._load_json(self.FILES["FEE_CFG"], self.DEFAULT_FEE).get(t, 0.25))
+    def set_fee(self, t, v):
+        d = self._load_json(self.FILES["FEE_CFG"], self.DEFAULT_FEE)
+        d[t] = float(v)
+        self._save_json(self.FILES["FEE_CFG"], d)
+
     def get_sniper_multiplier(self, t):
         default_val = self.DEFAULT_SNIPER_MULTIPLIER.get(t, 1.0)
         return float(self._load_json(self.FILES["SNIPER_MULTIPLIER_CFG"], self.DEFAULT_SNIPER_MULTIPLIER).get(t, default_val))

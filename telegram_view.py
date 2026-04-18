@@ -25,6 +25,8 @@
 # MODIFIED: [V28.05 그랜드 수술] 거대 프랑켄슈타인 1층 생성(2700달러 손실) 원흉인 '물량 통이관(SET_INIT)' 버튼 및 하위 UI 전면 소각
 # MODIFIED: [V28.17 UX 팩트 패치] V-REV 모드 시 불필요한 분할/목표 설정 버튼 렌더링 은폐 (디커플링 확보)
 # MODIFIED: [V28.21 UI 팩트 교정] 졸업 카드 및 장부 내 불필요한 시/분/초 시간 데이터를 100% 적출하여 가독성을 복구하고, 동시간 체결 내역을 일자별(Day)로 완벽히 병합하도록 렌더링 아키텍처 수술 완료
+# MODIFIED: [V28.22 스냅샷 렌더링 디커플링 수술] 졸업 카드 발급 버튼 생성 시 history_id를 수신하여 콜백 데이터에 각인(Lock-on)하도록 파라미터 및 버튼 렌더링 로직 교정 완료
+# MODIFIED: [V28.25 그랜드 수술] 수수료 설정 UI 버튼 및 동적 수수료율 상태 렌더링 파이프라인 개통 완료
 # ==========================================================
 import os
 import math
@@ -493,6 +495,9 @@ class TelegramView:
             ver = config.get_version(t)
             is_manual_vwap = getattr(config, 'get_manual_vwap_mode', lambda x: False)(t)
             
+            # MODIFIED: [V28.25] 동적 수수료율 스캔
+            fee_rate = getattr(config, 'get_fee', lambda x: 0.25)(t)
+            
             if ver == "V_REV":
                 icon = "⚖️"
                 ver_display = "V_REV 역추세"
@@ -511,10 +516,12 @@ class TelegramView:
                 msg += "▫️ 목표: [1층] 매수단가+0.6%\n"
                 msg += "              [상위층] 평단가+0.5% (디커플링)\n"
                 msg += f"▫️ 자동복리: {comp_rate}%\n"
+                msg += f"▫️ 증권사 수수료: <b>{fee_rate}%</b>\n"
                 msg += "⚖️ <b>역추세(Reversion) 하이브리드 엔진 스탠바이:</b>\n"
                 msg += "▫️ 전일 종가 앵커 기준 LIFO 큐 교차 매매 대기 중\n\n"
             else:
                 msg += f"▫️ 분할: {split_cnt}회\n▫️ 목표: {target_pct}%\n▫️ 자동복리: {comp_rate}%\n"
+                msg += f"▫️ 증권사 수수료: <b>{fee_rate}%</b>\n"
                 v14_mode_txt = "🖐️ 수동 위임 (한투 VWAP 알고리즘)" if is_manual_vwap else "📉 LOC 단일 타격 (초안정성)"
                 msg += f"▫️ 집행: <b>{v14_mode_txt}</b>\n\n"
                 
@@ -536,23 +543,29 @@ class TelegramView:
                 
                 keyboard.append([InlineKeyboardButton(avwap_txt, callback_data=avwap_cb)])
             
-            # MODIFIED: [V28.17] V-REV 모드 시 불필요한 분할/목표 설정 버튼 은폐 (UX 교정)
+            # MODIFIED: [V28.25] 수수료 설정 버튼(INPUT:FEE) 추가 배선 연결
             if ver == "V_REV":
                 row2 = [
-                    InlineKeyboardButton(f"💸 {t} 복리", callback_data=f"INPUT:COMPOUND:{t}")
+                    InlineKeyboardButton(f"💸 {t} 복리", callback_data=f"INPUT:COMPOUND:{t}"),
+                    InlineKeyboardButton(f"💳 {t} 수수료", callback_data=f"INPUT:FEE:{t}")
                 ]
+                keyboard.append(row2)
+                row3 = [
+                    InlineKeyboardButton(f"✂️ {t} 액면보정", callback_data=f"INPUT:STOCK_SPLIT:{t}")
+                ]
+                keyboard.append(row3)
             else:
                 row2 = [
                     InlineKeyboardButton(f"⚙️ {t} 분할", callback_data=f"INPUT:SPLIT:{t}"), 
                     InlineKeyboardButton(f"🎯 {t} 목표", callback_data=f"INPUT:TARGET:{t}"),
                     InlineKeyboardButton(f"💸 {t} 복리", callback_data=f"INPUT:COMPOUND:{t}")
                 ]
-            keyboard.append(row2)
-            
-            row3 = [
-                InlineKeyboardButton(f"✂️ {t} 액면보정", callback_data=f"INPUT:STOCK_SPLIT:{t}")
-            ]
-            keyboard.append(row3)
+                keyboard.append(row2)
+                row3 = [
+                    InlineKeyboardButton(f"✂️ {t} 액면보정", callback_data=f"INPUT:STOCK_SPLIT:{t}"),
+                    InlineKeyboardButton(f"💳 {t} 수수료", callback_data=f"INPUT:FEE:{t}")
+                ]
+                keyboard.append(row3)
             
         return msg, InlineKeyboardMarkup(keyboard)
 
@@ -594,10 +607,9 @@ class TelegramView:
         ]
         return msg, InlineKeyboardMarkup(keyboard)
 
-    def create_ledger_dashboard(self, ticker, qty, avg, invested, sold, records, t_val, split, is_history=False, is_reverse=False):
+    def create_ledger_dashboard(self, ticker, qty, avg, invested, sold, records, t_val, split, is_history=False, is_reverse=False, history_id=None):
         groups = {}
         for r in records:
-            # MODIFIED: [V28.21] 시간 데이터가 포함되어 행이 분리되는 맹점을 차단하기 위해 날짜(YYYY-MM-DD)만 추출하여 100% 병합
             date_only = r['date'][:10]
             key = (date_only, r['side'])
             if key not in groups:
@@ -623,7 +635,6 @@ class TelegramView:
         msg += "-"*30 + "\n"
         
         for item in agg_list[:50]: 
-            # MODIFIED: [V28.21] 불필요한 시/분/초 문자열을 도려내고 MM.DD 형식으로 진공 압축
             d_str = item['date'][5:10].replace('-', '.')
             s_str = "🔴매수" if item['side'] == 'BUY' else "🔵매도"
             msg += f"{item['no']:<3} {d_str} {s_str} ${item['avg']:<6.2f} {item['qty']}주\n"
@@ -645,7 +656,6 @@ class TelegramView:
             profit = sold - invested
             pct = (profit/invested*100) if invested > 0 else 0
             sign = "+" if profit >= 0 else "-"
-            # MODIFIED: [V28.21] 수익률 렌더링 부호 강제 할당 및 팩트 교정
             msg += f"▪️ <b>최종수익: {sign}${abs(profit):,.2f} ({sign}{abs(pct):.2f}%)</b>\n"
 
         msg += f"▪️ 총 매수액 : ${invested:,.2f}\n▪️ 총 매도액 : ${sold:,.2f}\n"
@@ -657,7 +667,10 @@ class TelegramView:
             keyboard.append([InlineKeyboardButton(f"🗄️ {ticker} V-REV 큐(Queue) 정밀 관리", callback_data=f"QUEUE:VIEW:{ticker}")])
             keyboard.append([InlineKeyboardButton("🔙 장부 대시보드 업데이트", callback_data=f"REC:SYNC:{ticker}")])
         else:
-            keyboard.append([InlineKeyboardButton("🖼️ 프리미엄 졸업 카드 발급", callback_data=f"HIST:IMG:{ticker}")])
+            if history_id is not None:
+                keyboard.append([InlineKeyboardButton("🖼️ 프리미엄 졸업 카드 발급", callback_data=f"HIST:IMG:{ticker}:{history_id}")])
+            else:
+                keyboard.append([InlineKeyboardButton("🖼️ 프리미엄 졸업 카드 발급", callback_data=f"HIST:IMG:{ticker}")])
             keyboard.append([InlineKeyboardButton("🔙 역사 목록으로 돌아가기", callback_data="HIST:LIST")])
 
         return msg, InlineKeyboardMarkup(keyboard)
