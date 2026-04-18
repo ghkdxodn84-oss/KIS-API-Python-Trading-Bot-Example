@@ -38,7 +38,8 @@ from scheduler_core import (
     scheduled_force_reset,
     scheduled_self_cleaning,
     get_target_hour,
-    perform_self_cleaning
+    perform_self_cleaning,
+    is_market_open
 )
 from scheduler_trade import (
     scheduled_regular_trade,
@@ -88,6 +89,7 @@ logging.basicConfig(
 )
 
 async def scheduled_volatility_scan(context):
+    if not is_market_open(): return
     """
     10:20 EST (정규장 개장 50분 후) 격발.
     대상 종목들의 HV와 당일 VXN을 연산하여 터미널 메인 화면에 1-Tier 브리핑 덤프
@@ -213,21 +215,21 @@ def main():
     jq.run_daily(SYNC_FUNC, time=datetime.time(SYNC_HOUR, 30, tzinfo=kst), days=tuple(range(7)), chat_id=ADMIN_CHAT_ID, data=app_data)
     
     # MODIFIED: [이중 타격 방어] 17시/18시가 무조건 모두 등록되는 버그를 제거하고 TARGET_HOUR 단일 슬롯에만 락 초기화 등록
-    jq.run_daily(scheduled_force_reset, time=datetime.time(TARGET_HOUR, 0, tzinfo=kst), days=(0,1,2,3,4), chat_id=ADMIN_CHAT_ID, data=app_data)
+    jq.run_daily(scheduled_force_reset, time=datetime.time(TARGET_HOUR, 0, tzinfo=kst), days=tuple(range(7)), chat_id=ADMIN_CHAT_ID, data=app_data)
         
-    jq.run_daily(scheduled_volatility_scan, time=datetime.time(10, 20, tzinfo=est), days=(0,1,2,3,4), chat_id=ADMIN_CHAT_ID, data=app_data)
+    jq.run_daily(scheduled_volatility_scan, time=datetime.time(10, 20, tzinfo=est), days=tuple(range(7)), chat_id=ADMIN_CHAT_ID, data=app_data)
     
     # 2. 실전 전투 매매 스케줄러 (trade)
     # MODIFIED: [이중 타격 방어] 17:05/18:05 동시 발사(Double-buying) 버그를 원천 차단하고 TARGET_HOUR에만 정규장 타격 스케줄 등록
-    jq.run_daily(scheduled_regular_trade, time=datetime.time(TARGET_HOUR, 5, tzinfo=kst), days=(0,1,2,3,4), chat_id=ADMIN_CHAT_ID, data=app_data)
+    jq.run_daily(scheduled_regular_trade, time=datetime.time(TARGET_HOUR, 5, tzinfo=kst), days=tuple(range(7)), chat_id=ADMIN_CHAT_ID, data=app_data)
     
-    jq.run_daily(scheduled_vwap_init_and_cancel, time=datetime.time(15, 30, tzinfo=est), days=(0,1,2,3,4), chat_id=ADMIN_CHAT_ID, data=app_data)
+    jq.run_daily(scheduled_vwap_init_and_cancel, time=datetime.time(15, 30, tzinfo=est), days=tuple(range(7)), chat_id=ADMIN_CHAT_ID, data=app_data)
 
     # 🚨 [수술 완료] 콜드 스타트 폭풍 방어: 봇 구동 후 30초 뒤 첫 실행(first=30)
     jq.run_repeating(scheduled_sniper_monitor, interval=60, first=30, chat_id=ADMIN_CHAT_ID, data=app_data)
     jq.run_repeating(scheduled_vwap_trade, interval=60, first=30, chat_id=ADMIN_CHAT_ID, data=app_data)
     
-    jq.run_daily(scheduled_after_market_lottery, time=datetime.time(16, 5, tzinfo=est), days=(0,1,2,3,4), chat_id=ADMIN_CHAT_ID, data=app_data)
+    jq.run_daily(scheduled_after_market_lottery, time=datetime.time(16, 5, tzinfo=est), days=tuple(range(7)), chat_id=ADMIN_CHAT_ID, data=app_data)
 
     jq.run_daily(scheduled_self_cleaning, time=datetime.time(6, 0, tzinfo=kst), days=tuple(range(7)), chat_id=ADMIN_CHAT_ID, data=app_data)
         
