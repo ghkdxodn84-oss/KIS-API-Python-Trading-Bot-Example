@@ -129,6 +129,13 @@ def perform_self_cleaning():
                 try: os.remove(f)
                 except: pass
                 
+        # NEW: [7일 초과 스냅샷 및 VWAP 상태 파일 소각 (디스크 부하 및 inode 누수 원천 차단)]
+        for prefix in ["daily_snapshot_*", "vwap_state_*"]:
+            for f in glob.glob(f"data/{prefix}.json"):
+                if os.path.isfile(f) and os.stat(f).st_mtime < now - seven_days:
+                    try: os.remove(f)
+                    except: pass
+                
         for directory in ["data", "logs"]:
             for f in glob.glob(f"{directory}/tmp*"):
                 if os.path.isfile(f) and os.stat(f).st_mtime < now - one_day:
@@ -300,4 +307,3 @@ async def run_auto_sync(context, time_str):
         await bot._display_ledger(success_tickers[0], chat_id, context, message_obj=status_msg, pre_fetched_holdings=holdings)
     else:
         await status_msg.edit_text(f"📝 <b>[{time_str}] 장부 동기화 완료</b> (표시할 진행 중인 장부가 없습니다)", parse_mode='HTML')
-

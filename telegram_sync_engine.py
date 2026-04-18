@@ -3,6 +3,9 @@
 # MODIFIED: [V28.10 장부 환각 엣지 케이스 수술] 실잔고와 큐 장부 수량이 일치할 경우
 # 비파괴 보정(CALIB) 호출을 원천 차단하는 멱등성 락온(Idempotency Lock-on) 방어막 이식.
 # 이로써 21주가 42주로 단순 중복 덧셈되던 치명적 환각 버그 영구 소각 완료.
+# MODIFIED: [V28.21 동기화 엇박자 그랜드 수술] 졸업 판별(0주 스캔) 전, 
+# 당일 KIS 매도 체결 영수증을 장부에 우선 기록하도록 파이프라인 순서(Order)를 
+# 전면 뒤집어 락온함. 이로써 매도액 누락 및 수익률 -100% 환각 버그 원천 차단.
 # ==========================================================
 # NEW: [리팩토링 1단계] 핵심 비즈니스 코어(장부 동기화, 졸업 판별, 큐 관리) 독립 클래스로 캡슐화
 import logging
@@ -95,33 +98,108 @@ class TelegramSyncEngine:
                 actual_qty = int(float(holdings.get(ticker, {'qty': 0}).get('qty') or 0))
                 actual_avg = float(holdings.get(ticker, {'avg': 0}).get('avg') or 0.0)
 
+                # ==========================================================
+                # MODIFIED: [V28.21 동기화 엇박자 그랜드 수술] 파이프라인 순서 역전
+                # 졸업 판별(actual_qty == 0) 이전에 KIS 당일 체결 내역을 장부에 우선 동기화하도록 로직 블록을 위로 끌어올림.
+                # ==========================================================
+                target_execs = await asyncio.to_thread(self.broker.get_execution_history, ticker, target_kis_str, target_kis_str)
+                if target_execs:
+                    calibrated_count = self.cfg.calibrate_ledger_prices(ticker, target_ledger_str, target_execs)
+                    if calibrated_count > 0:
+                        logging.info(f"🔧 [{ticker}] LOC/MOC 주문 {calibrated_count}건에 대해 실제 체결 단가 소급 업데이트를 완료했습니다.")
+
+                recs = [r for r in self.cfg.get_ledger() if r['ticker'] == ticker]
+                ledger_qty, avg_price, _, _ = self.cfg.calculate_holdings(ticker, recs)
+                
+                diff = actual_qty - ledger_qty
+                price_diff = abs(actual_avg - avg_price)
+
+                # V-REV 모드가 아닐 때(V14) 0주가 아니더라도 오차가 있으면 비파괴 보정을 먼저 쳐둠
+                if self.cfg.get_version(ticker) != "V_REV":
+                    if diff == 0 and price_diff < 0.01:
+                        pass 
+                    elif diff == 0 and price_diff >= 0.01:
+                        self.cfg.calibrate_avg_price(ticker, actual_avg)
+                        await context.bot.send_message(chat_id, f"🔧 <b>[{ticker}] 장부 평단가 미세 오차({price_diff:.4f}) 교정 완료!</b>", parse_mode='HTML')
+                    elif diff != 0:
+                        temp_recs = [r for r in recs if r['date'] != target_ledger_str or 'INIT' in str(r.get('exec_id', ''))]
+                        temp_qty, temp_avg, _, _ = self.cfg.calculate_holdings(ticker, temp_recs)
+                        
+                        temp_sim_qty = temp_qty
+                        temp_sim_avg = temp_avg
+                        new_target_records = []
+                        
+                        if target_execs:
+                            target_execs.sort(key=lambda x: x.get('ord_tmd', '000000')) 
+                            for ex in target_execs:
+                                side_cd = ex.get('sll_buy_dvsn_cd')
+                                exec_qty = int(float(ex.get('ft_ccld_qty', '0')))
+                                exec_price = float(ex.get('ft_ccld_unpr3', '0'))
+                                
+                                if side_cd == "02": 
+                                    new_avg = ((temp_sim_qty * temp_sim_avg) + (exec_qty * exec_price)) / (temp_sim_qty + exec_qty) if (temp_sim_qty + exec_qty) > 0 else exec_price
+                                    temp_sim_qty += exec_qty
+                                    temp_sim_avg = new_avg
+                                else:
+                                    temp_sim_qty -= exec_qty
+                                    
+                                new_target_records.append({
+                                    'date': target_ledger_str, 'side': "BUY" if side_cd == "02" else "SELL",
+                                    'qty': exec_qty, 'price': exec_price, 'avg_price': temp_sim_avg
+                                })
+                                
+                        gap_qty = actual_qty - temp_sim_qty
+                        if gap_qty != 0:
+                            calib_side = "BUY" if gap_qty > 0 else "SELL"
+                            new_target_records.append({
+                                'date': target_ledger_str, 
+                                'side': calib_side,
+                                'qty': abs(gap_qty), 
+                                'price': actual_avg, 
+                                'avg_price': actual_avg,
+                                'exec_id': f"CALIB_{int(time.time())}",
+                                'desc': "비파괴 보정"
+                            })
+                            
+                        if new_target_records:
+                            for r in new_target_records:
+                                r['avg_price'] = actual_avg
+                        elif temp_recs: 
+                            temp_recs[-1]['avg_price'] = actual_avg
+                            
+                        self.cfg.overwrite_incremental_ledger(ticker, temp_recs, new_target_records)
+                        
+                        if gap_qty != 0:
+                            await context.bot.send_message(chat_id, f"🔧 <b>[{ticker}] 비파괴 장부 보정 완료!</b>\n▫️ 오차 수량({gap_qty}주)을 기존 역사 보존 상태로 안전하게 교정했습니다.", parse_mode='HTML')
+
+                # ==========================================================
+                # V-REV 큐 관리 및 0주 졸업 판별 로직 시작
+                # ==========================================================
                 if self.cfg.get_version(ticker) == "V_REV":
                     if not getattr(self, 'queue_ledger', None):
                         from queue_ledger import QueueLedger
                         self.queue_ledger = QueueLedger()
                     
                     q_data_before = self.queue_ledger.get_queue(ticker)
-                    ledger_qty = sum(int(float(item.get("qty") or 0)) for item in q_data_before)
+                    vrev_ledger_qty = sum(int(float(item.get("qty") or 0)) for item in q_data_before)
                     
-                    if actual_qty == 0 and ledger_qty > 0:
-                        # MODIFIED: [Fix 1 - 조기 발급 락온] 10:00 KST 이전이면 V-REV 졸업 처리 전체 보류 (가결제 오차 방지)
+                    if actual_qty == 0 and vrev_ledger_qty > 0:
                         if now_kst.hour < 10:
                             await context.bot.send_message(chat_id, "⏳ <b>증권사 확정 정산(10:00 KST) 대기 중입니다.</b> 가결제 오차 방지를 위해 졸업 카드 발급 및 장부 초기화가 보류됩니다.", parse_mode='HTML')
                             self._sync_escrow_cash(ticker)
                             return "SUCCESS"
 
                         added_seed = 0.0
-                        # MODIFIED: [Fix 2 - V-REV Fail-Safe] 스냅샷 성공 여부 추적 플래그 초기화. 에러 시 큐 장부 보존.
                         _vrev_snap_ok = False
                         snapshot = None
                         try:
                             total_invested = sum(float(item.get("qty", 0)) * float(item.get("price", 0)) for item in q_data_before)
-                            q_avg_price = total_invested / ledger_qty if ledger_qty > 0 else 0.0
+                            q_avg_price = total_invested / vrev_ledger_qty if vrev_ledger_qty > 0 else 0.0
                             
                             curr_p = await asyncio.to_thread(self.broker.get_current_price, ticker)
                             clear_price = curr_p if curr_p and curr_p > 0 else q_avg_price * 1.006 
                             
-                            snapshot = self.strategy.capture_vrev_snapshot(ticker, clear_price, q_avg_price, ledger_qty)
+                            snapshot = self.strategy.capture_vrev_snapshot(ticker, clear_price, q_avg_price, vrev_ledger_qty)
                             
                             if snapshot:
                                 realized_pnl = snapshot['realized_pnl']
@@ -183,10 +261,7 @@ class TelegramSyncEngine:
                         self._sync_escrow_cash(ticker)
                         return "SUCCESS"
                         
-                    # MODIFIED: [V28.10 장부 환각 엣지 케이스 수술]
-                    # KIS 실잔고와 장부 수량이 완벽히 일치하면 sync_with_broker 호출을 원천 차단(멱등성 락온).
-                    # 이미 반영된 21주 위에 당일 체결된 21주가 단순 덧셈(Append)되어 42주로 부풀려지던 엣지 케이스 영구 소각.
-                    if actual_qty == ledger_qty:
+                    if actual_qty == vrev_ledger_qty:
                         pass
                     else:
                         calibrated = self.queue_ledger.sync_with_broker(ticker, actual_qty, actual_avg)
@@ -195,30 +270,15 @@ class TelegramSyncEngine:
                     
                     self._sync_escrow_cash(ticker)
                     return "SUCCESS"
-# ==========================================================
-# [telegram_sync_engine.py] - 🌟 100% 통합 완성본 🌟 (Part 2)
-# ==========================================================
 
-# ... (앞선 1부 코드의 process_auto_sync 함수 V-REV 분기 끝부분에 이어집니다) ...
-
-                target_execs = await asyncio.to_thread(self.broker.get_execution_history, ticker, target_kis_str, target_kis_str)
-                if target_execs:
-                    calibrated_count = self.cfg.calibrate_ledger_prices(ticker, target_ledger_str, target_execs)
-                    if calibrated_count > 0:
-                        logging.info(f"🔧 [{ticker}] LOC/MOC 주문 {calibrated_count}건에 대해 실제 체결 단가 소급 업데이트를 완료했습니다.")
-
-                recs = [r for r in self.cfg.get_ledger() if r['ticker'] == ticker]
-                ledger_qty, avg_price, _, _ = self.cfg.calculate_holdings(ticker, recs)
-                
-                diff = actual_qty - ledger_qty
-                price_diff = abs(actual_avg - avg_price)
-
+                # ==========================================================
+                # V14 0주 졸업 판별 로직 (동기화 파이프라인 수술 후 위치 이동)
+                # ==========================================================
                 if actual_qty == 0:
                     if ledger_qty > 0:
                         kst = pytz.timezone('Asia/Seoul')
                         today_str = datetime.datetime.now(kst).strftime('%Y-%m-%d')
                         
-                        # MODIFIED: [Fix 1 - 조기 발급 락온] 10:00 KST 이전이면 V14 졸업 처리 보류 (가결제 오차 방지)
                         if now_kst.hour < 10:
                             await context.bot.send_message(chat_id, "⏳ <b>증권사 확정 정산(10:00 KST) 대기 중입니다.</b> 가결제 오차 방지를 위해 졸업 카드 발급 및 장부 초기화가 보류됩니다.", parse_mode='HTML')
                         else:
@@ -250,67 +310,10 @@ class TelegramSyncEngine:
                                     self.cfg._save_json(self.cfg.FILES["LEDGER"], all_recs)
                                     await context.bot.send_message(chat_id, f"⚠️ <b>[{ticker} 강제 정산 완료]</b>\n잔고가 0주이나 마이너스 수익 상태이므로 명예의 전당 박제 없이 장부를 비우고 새출발 타점을 장전합니다.", parse_mode='HTML')
                             except Exception as e:
-                                # MODIFIED: [Fix 3 - 악성 찌꺼기 철거] 에러 발생 시 강제 장부 초기화 코드 100% 삭제 (장부 보존)
                                 logging.error(f"강제 졸업 처리 중 에러: {e}")
 
                     self._sync_escrow_cash(ticker) 
                     return "SUCCESS"
-
-                if diff == 0 and price_diff < 0.01:
-                    pass 
-                elif diff == 0 and price_diff >= 0.01:
-                    self.cfg.calibrate_avg_price(ticker, actual_avg)
-                    await context.bot.send_message(chat_id, f"🔧 <b>[{ticker}] 장부 평단가 미세 오차({price_diff:.4f}) 교정 완료!</b>", parse_mode='HTML')
-                elif diff != 0:
-                    temp_recs = [r for r in recs if r['date'] != target_ledger_str or 'INIT' in str(r.get('exec_id', ''))]
-                    temp_qty, temp_avg, _, _ = self.cfg.calculate_holdings(ticker, temp_recs)
-                    
-                    temp_sim_qty = temp_qty
-                    temp_sim_avg = temp_avg
-                    new_target_records = []
-                    
-                    if target_execs:
-                        target_execs.sort(key=lambda x: x.get('ord_tmd', '000000')) 
-                        for ex in target_execs:
-                            side_cd = ex.get('sll_buy_dvsn_cd')
-                            exec_qty = int(float(ex.get('ft_ccld_qty', '0')))
-                            exec_price = float(ex.get('ft_ccld_unpr3', '0'))
-                            
-                            if side_cd == "02": 
-                                new_avg = ((temp_sim_qty * temp_sim_avg) + (exec_qty * exec_price)) / (temp_sim_qty + exec_qty) if (temp_sim_qty + exec_qty) > 0 else exec_price
-                                temp_sim_qty += exec_qty
-                                temp_sim_avg = new_avg
-                            else:
-                                temp_sim_qty -= exec_qty
-                                
-                            new_target_records.append({
-                                'date': target_ledger_str, 'side': "BUY" if side_cd == "02" else "SELL",
-                                'qty': exec_qty, 'price': exec_price, 'avg_price': temp_sim_avg
-                            })
-                            
-                    gap_qty = actual_qty - temp_sim_qty
-                    if gap_qty != 0:
-                        calib_side = "BUY" if gap_qty > 0 else "SELL"
-                        new_target_records.append({
-                            'date': target_ledger_str, 
-                            'side': calib_side,
-                            'qty': abs(gap_qty), 
-                            'price': actual_avg, 
-                            'avg_price': actual_avg,
-                            'exec_id': f"CALIB_{int(time.time())}",
-                            'desc': "비파괴 보정"
-                        })
-                        
-                    if new_target_records:
-                        for r in new_target_records:
-                            r['avg_price'] = actual_avg
-                    elif temp_recs: 
-                        temp_recs[-1]['avg_price'] = actual_avg
-                        
-                    self.cfg.overwrite_incremental_ledger(ticker, temp_recs, new_target_records)
-                    
-                    if gap_qty != 0:
-                        await context.bot.send_message(chat_id, f"🔧 <b>[{ticker}] 비파괴 장부 보정 완료!</b>\n▫️ 오차 수량({gap_qty}주)을 기존 역사 보존 상태로 안전하게 교정했습니다.", parse_mode='HTML')
 
                 self._sync_escrow_cash(ticker)
                 return "SUCCESS"

@@ -24,6 +24,7 @@
 # MODIFIED: [V28.04 개념 패치] 자동(자체 U-Curve 엔진)/수동(한투 알고리즘 위임) 모드 수수료 오해 텍스트 전면 교정 완료
 # MODIFIED: [V28.05 그랜드 수술] 거대 프랑켄슈타인 1층 생성(2700달러 손실) 원흉인 '물량 통이관(SET_INIT)' 버튼 및 하위 UI 전면 소각
 # MODIFIED: [V28.17 UX 팩트 패치] V-REV 모드 시 불필요한 분할/목표 설정 버튼 렌더링 은폐 (디커플링 확보)
+# MODIFIED: [V28.21 UI 팩트 교정] 졸업 카드 및 장부 내 불필요한 시/분/초 시간 데이터를 100% 적출하여 가독성을 복구하고, 동시간 체결 내역을 일자별(Day)로 완벽히 병합하도록 렌더링 아키텍처 수술 완료
 # ==========================================================
 import os
 import math
@@ -596,7 +597,9 @@ class TelegramView:
     def create_ledger_dashboard(self, ticker, qty, avg, invested, sold, records, t_val, split, is_history=False, is_reverse=False):
         groups = {}
         for r in records:
-            key = (r['date'], r['side'])
+            # MODIFIED: [V28.21] 시간 데이터가 포함되어 행이 분리되는 맹점을 차단하기 위해 날짜(YYYY-MM-DD)만 추출하여 100% 병합
+            date_only = r['date'][:10]
+            key = (date_only, r['side'])
             if key not in groups:
                 groups[key] = {'sum_qty': 0, 'sum_cost': 0}
             groups[key]['sum_qty'] += r['qty']
@@ -620,7 +623,8 @@ class TelegramView:
         msg += "-"*30 + "\n"
         
         for item in agg_list[:50]: 
-            d_str = item['date'][5:].replace('-', '.')
+            # MODIFIED: [V28.21] 불필요한 시/분/초 문자열을 도려내고 MM.DD 형식으로 진공 압축
+            d_str = item['date'][5:10].replace('-', '.')
             s_str = "🔴매수" if item['side'] == 'BUY' else "🔵매도"
             msg += f"{item['no']:<3} {d_str} {s_str} ${item['avg']:<6.2f} {item['qty']}주\n"
             
@@ -641,7 +645,8 @@ class TelegramView:
             profit = sold - invested
             pct = (profit/invested*100) if invested > 0 else 0
             sign = "+" if profit >= 0 else "-"
-            msg += f"▪️ <b>최종수익: {sign}${abs(profit):,.2f} ({pct:.2f}%)</b>\n"
+            # MODIFIED: [V28.21] 수익률 렌더링 부호 강제 할당 및 팩트 교정
+            msg += f"▪️ <b>최종수익: {sign}${abs(profit):,.2f} ({sign}{abs(pct):.2f}%)</b>\n"
 
         msg += f"▪️ 총 매수액 : ${invested:,.2f}\n▪️ 총 매도액 : ${sold:,.2f}\n"
 
