@@ -11,6 +11,7 @@
 # 콜백 데이터에 고유 식별자(ID)가 존재할 경우 해당 과거 지층(History)을 
 # 100% 정밀 타격하여 렌더링하도록 팩트 라우팅 엔진 이식.
 # MODIFIED: [V28.25 그랜드 수술] 동적 수수료율 설정을 위한 INPUT:FEE 콜백 라우팅 분기 신설 완료.
+# MODIFIED: [V28.27] 수동 매도로 인한 0주 락온 디커플링 상태 감지 및 /reset 유도 방어막 추가
 # ==========================================================
 import logging
 import datetime
@@ -555,6 +556,15 @@ class TelegramCallbacks:
             kis_qty = int(float(holdings.get(ticker, {}).get('qty', 0)))
             max_qty = self._get_max_holdings_qty(ticker, kis_qty)
             
+            # NEW: [수동 뇌동매매 0주 락온 디커플링 감지 및 /reset 강제 유도 렌더링]
+            # 🚨 [AI 에이전트 절대 주의 - 수동 매도 감지 및 /reset 유도 방어막]
+            if kis_qty == 0 and max_qty > 0 and current_ver != new_ver:
+                msg = f"🚨 <b>[ 퀀트 모드 전환 강제 차단: 수동 매도 감지 ]</b>\n\n"
+                msg += f"실잔고는 0주이나 장부에 잔여 수량({max_qty}주)이 남아있어 모드 전환이 차단되었습니다.\n"
+                msg += "증권사 앱에서 수동으로 전량 매도하셨다면, 채팅창에 <code>/reset</code>을 입력하여 장부를 초기화한 후 다시 시도해주세요."
+                await query.edit_message_text(msg, parse_mode='HTML')
+                return
+            
             if max_qty > 0 and current_ver != new_ver:
                 msg = f"🚨 <b>[ 퀀트 모드 전환 강제 차단 ]</b>\n\n"
                 msg += f"현재 <b>[{ticker}] {max_qty}주</b>를 보유 중입니다. (삼중 교차 검증)\n"
@@ -601,6 +611,15 @@ class TelegramCallbacks:
                 
             kis_qty = int(float(holdings.get(ticker, {}).get('qty', 0)))
             max_qty = self._get_max_holdings_qty(ticker, kis_qty)
+            
+            # NEW: [수동 뇌동매매 0주 락온 디커플링 감지 및 /reset 강제 유도 렌더링]
+            # 🚨 [AI 에이전트 절대 주의 - 수동 매도 감지 및 /reset 유도 방어막]
+            if kis_qty == 0 and max_qty > 0 and current_ver != target_ver:
+                msg = f"🚨 <b>[ 퀀트 모드 전환 강제 차단: 수동 매도 감지 ]</b>\n\n"
+                msg += f"실잔고는 0주이나 장부에 잔여 수량({max_qty}주)이 남아있어 모드 전환이 차단되었습니다.\n"
+                msg += "증권사 앱에서 수동으로 전량 매도하셨다면, 채팅창에 <code>/reset</code>을 입력하여 장부를 초기화한 후 다시 시도해주세요."
+                await query.edit_message_text(msg, parse_mode='HTML')
+                return
             
             if max_qty > 0 and current_ver != target_ver:
                 msg = f"🚨 <b>[ 퀀트 모드 전환 강제 차단 ]</b>\n\n"
@@ -689,7 +708,6 @@ class TelegramCallbacks:
                 ko_name = "자동 복리율(%)"
             elif sub == "STOCK_SPLIT":
                 ko_name = "액면 분할/병합 비율 (예: 10분할은 10, 10병합은 0.1)"
-            # NEW: [V28.25] 텔레그램 수수료 텍스트 입력 프롬프트 동적 출력
             elif sub == "FEE":
                 ko_name = "증권사 수수료율(%)"
             else:

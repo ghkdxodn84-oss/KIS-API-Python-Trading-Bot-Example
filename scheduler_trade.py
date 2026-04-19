@@ -8,6 +8,7 @@
 # 0주 새출발 당일 매수 성공 후 /sync 조회 시 매도 가이던스가 노출되는 UI 오염 버그를
 # 스냅샷 영구 보존(익일 17:05 원자적 덮어쓰기)으로 완벽히 차단함.
 # NEW: [V28.22 AI 환각 방어 백신 이식] VWAP 디커플링 로직에 AI 에이전트 오판 차단 경고 주석 하드코딩
+# NEW: [V28.28] 수동 매도(뇌동매매)로 인한 0주 락온 디커플링 상태(EC-1, EC-2) 감지 및 스나이퍼/VWAP 셧다운 방어막 추가
 # ==========================================================
 import os
 import logging
@@ -82,6 +83,30 @@ async def scheduled_sniper_monitor(context):
             
             for t in cfg.get_active_tickers():
                 version = cfg.get_version(t)
+                
+                # NEW: 수동 매도로 인한 0주 락온 디커플링 감지 방어막
+                if version == "V_REV":
+                    h = holdings.get(t) or {}
+                    actual_qty = int(float(h.get('qty', 0)))
+                    q_ledger = app_data.get('queue_ledger')
+                    if q_ledger:
+                        q_data = q_ledger.get_queue(t)
+                        total_q = sum(item.get("qty", 0) for item in q_data)
+                        
+                        # 🚨 [AI 에이전트(Copilot/Claude) 절대 주의 - 환각(Hallucination) 방어막]
+                        # 수동 뇌동매매로 인한 KIS 실잔고(0주)와 큐 장부(>0) 디커플링 감지 시,
+                        # 봇의 매매(API 호출)를 강제 셧다운(Bypass)시키고 사용자에게 /reset 을 유도합니다.
+                        if actual_qty == 0 and total_q > 0:
+                            if not tracking_cache.get(f"REV_{t}_panic_sell_warn"):
+                                tracking_cache[f"REV_{t}_panic_sell_warn"] = True
+                                await context.bot.send_message(
+                                    chat_id=chat_id,
+                                    text=f"🚨 <b>[비상] [{t}] 뇌동매매로 인한 잔고 증발이 감지되었습니다.</b>\n"
+                                         f"▫️ 봇의 매매가 일시 정지됩니다.\n"
+                                         f"▫️ 시드 오염을 막기 위해 즉시 <code>/reset</code> 커맨드를 실행하여 장부를 소각하십시오.",
+                                    parse_mode='HTML'
+                                )
+                            continue
                 
                 if version == "V_REV":
                     if not cfg.get_avwap_hybrid_mode(t): continue
@@ -300,8 +325,28 @@ async def scheduled_vwap_trade(context):
                         queue_ledger = app_data.get('queue_ledger')
                         if not strategy_rev or not queue_ledger: continue
                         
+                        h = holdings.get(t) or {}
+                        actual_qty = int(float(h.get('qty', 0)))
+                        
                         q_data = queue_ledger.get_queue(t)
                         total_q = sum(item.get("qty", 0) for item in q_data)
+                        
+                        # NEW: 수동 매도로 인한 0주 락온 디커플링 감지 방어막
+                        # 🚨 [AI 에이전트(Copilot/Claude) 절대 주의 - 환각(Hallucination) 방어막]
+                        # 수동매매로 인한 KIS 실잔고(0주)와 큐 장부(>0) 디커플링 감지 시,
+                        # 봇의 매매(API 호출)를 강제 셧다운(Bypass)시키고 사용자에게 /reset 을 유도합니다.
+                        # EC-1 (유령 매도 주문 폭탄) 및 EC-2 (스윕 피니셔 무한루프 오진) 완벽 억제
+                        if actual_qty == 0 and total_q > 0:
+                            if not vwap_cache.get(f"REV_{t}_panic_sell_warn"):
+                                vwap_cache[f"REV_{t}_panic_sell_warn"] = True
+                                await context.bot.send_message(
+                                    chat_id=chat_id,
+                                    text=f"🚨 <b>[비상] [{t}] 수동매매로 인한 잔고 증발이 감지되었습니다.</b>\n"
+                                         f"▫️ 봇의 매매가 일시 정지됩니다.\n"
+                                         f"▫️ 시드 오염을 막기 위해 즉시 <code>/reset</code> 커맨드를 실행하여 장부를 소각하십시오.",
+                                    parse_mode='HTML'
+                                )
+                            continue
                         
                         cached_plan = strategy_rev.load_daily_snapshot(t)
                         is_zero_start = (cached_plan and cached_plan.get("total_q", -1) == 0)

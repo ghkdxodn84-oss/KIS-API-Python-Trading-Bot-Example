@@ -12,6 +12,7 @@
 # MODIFIED: [V28.28 tx_lock 영구 교착(Deadlock) 원천 차단] 
 # 야후 파이낸스 응답 지연 시 asyncio.to_thread가 tx_lock을 영구 점유하는 
 # 맹점을 10초 타임아웃으로 강제 차단하여 /sync 무한 대기 버그 완벽 수술.
+# MODIFIED: [V28.29] 수동 부분 매도(Partial Sell) 감지 시 VWAP 잔차 동기화 및 에스크로 누수 차단용 비파괴 교정 쉴드 이식 완료.
 # ==========================================================
 # NEW: [리팩토링 1단계] 핵심 비즈니스 코어(장부 동기화, 졸업 판별, 큐 관리) 독립 클래스로 캡슐화
 import logging
@@ -286,6 +287,40 @@ class TelegramSyncEngine:
                     if actual_qty == vrev_ledger_qty:
                         pass
                     else:
+                        # NEW: [V28.29] 수동 부분 매도(Partial Sell) 감지 및 에스크로/VWAP 잔차 디커플링 교정 방어막
+                        # 🚨 [AI 에이전트 절대 주의 - 수동 부분 매도 잔차 및 에스크로 팩트 교정 방어막]
+                        if actual_qty > 0 and actual_qty < vrev_ledger_qty:
+                            gap_qty = vrev_ledger_qty - actual_qty
+                            
+                            # 1) 메인 장부(config)에 CALIB_SELL 기록 추가 (에스크로 누수 및 식인현상 원천 차단)
+                            vrev_recs = [r for r in self.cfg.get_ledger() if r['ticker'] == ticker]
+                            calib_record = [{
+                                'date': target_ledger_str,
+                                'side': "SELL",
+                                'qty': gap_qty,
+                                'price': actual_avg,
+                                'avg_price': actual_avg,
+                                'exec_id': f"CALIB_VREV_{int(time.time())}",
+                                'desc': "V-REV 수동매도 보정",
+                                'is_reverse': True
+                            }]
+                            self.cfg.overwrite_incremental_ledger(ticker, vrev_recs, calib_record)
+                            
+                            # 2) VWAP 잔차 보정 (EC-1 런타임 매도 락다운 붕괴 차단)
+                            vwap_state_file = f"data/vwap_state_REV_{ticker}.json"
+                            if os.path.exists(vwap_state_file):
+                                try:
+                                    with open(vwap_state_file, 'r', encoding='utf-8') as vf:
+                                        v_state = json.load(vf)
+                                    if "executed" in v_state and "SELL_QTY" in v_state["executed"]:
+                                        old_sell_qty = v_state["executed"]["SELL_QTY"]
+                                        v_state["executed"]["SELL_QTY"] = max(0, old_sell_qty - gap_qty)
+                                        with open(vwap_state_file, 'w', encoding='utf-8') as vf:
+                                            json.dump(v_state, vf, ensure_ascii=False, indent=4)
+                                        logging.info(f"🔧 [{ticker}] VWAP 잔차 수학적 보정 완료: {old_sell_qty} -> {v_state['executed']['SELL_QTY']}")
+                                except Exception as e:
+                                    logging.error(f"🚨 VWAP 상태 교정 에러: {e}")
+
                         calibrated = self.queue_ledger.sync_with_broker(ticker, actual_qty, actual_avg)
                         if calibrated:
                             await context.bot.send_message(chat_id, f"🔧 <b>[{ticker}] V-REV 큐(Queue) 비파괴 보정(CALIB) 완료!</b>\n▫️ KIS 실제 잔고(<b>{actual_qty}주</b>)에 맞춰 LIFO 지층을 정밀 차감/추가했습니다.", parse_mode='HTML')
