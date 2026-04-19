@@ -10,6 +10,9 @@
 # 🚨 [V27.10 그랜드 수술] 에스크로 캐시 영구 박제(Ghost Escrow 방어), 액면분할 수학적 반올림(Banker's Rounding) 오류 교정 및 fsync 무결성 확보
 # 🚨 [V27.11 핫픽스] I/O FD 누수 방어, TOCTOU 경쟁 상태 원천 차단 래퍼 추가
 # MODIFIED: [V28.25 그랜드 수술] 수수료 하드코딩 전면 소각 및 동적 수수료(Fee) 설정 엔진 탑재
+# MODIFIED: [V28.26 타임존 락온 그랜드 수술] KST 기준 날짜 연산을 전면 폐기하고,
+# INIT 레코드 기록 및 락(Lock) 해제 등 모든 기준 시간을 EST(미국 동부)로 100% 형변환하여 
+# 타임 패러독스로 인한 스냅샷 매핑 실패 버그를 영구 소각 완료. (EC-3 방어)
 # ==========================================================
 import json
 import os
@@ -351,8 +354,14 @@ class ConfigManager:
             print(f"⚠️ [보안 차단] {ticker}의 장부 기록이 이미 존재하여 파괴적 INIT 덮어쓰기를 차단했습니다.")
             return
             
-        kst = pytz.timezone('Asia/Seoul')
-        today_str = datetime.datetime.now(kst).strftime('%Y-%m-%d')
+        # 🚨 [AI 에이전트(Copilot/Claude) 절대 주의 - 타임존 락온 방어막 (EC-3)]
+        # INIT 장부의 생성 날짜(date 필드)를 기록할 때 KST 기준 시간을 전면 폐기하고
+        # EST(미국 동부) 기준으로 강제 형변환(Lock-on) 완료.
+        # 이 날짜는 get_dynamic_plan에서 해당일 스냅샷 파일(daily_snapshot_REV_YYYY-MM-DD_SOXL.json)을
+        # 로드하는 매핑 키(Mapping Key)로 활용되므로, KST 자정 이후(미국 장중) INIT 기록 시
+        # 스냅샷 키가 +1일 틀어져 지시서 앵커 타점이 증발/오염되는 치명적 버그를 원천 차단함.
+        est = pytz.timezone('US/Eastern')
+        today_str = datetime.datetime.now(est).strftime('%Y-%m-%d')
         new_id = 1 if not ledger else max(r.get('id', 0) for r in ledger) + 1
         
         ledger.append({

@@ -6,6 +6,9 @@
 # MODIFIED: [V28.21 동기화 엇박자 그랜드 수술] 졸업 판별(0주 스캔) 전, 
 # 당일 KIS 매도 체결 영수증을 장부에 우선 기록하도록 파이프라인 순서(Order)를 
 # 전면 뒤집어 락온함. 이로써 매도액 누락 및 수익률 -100% 환각 버그 원천 차단.
+# MODIFIED: [V28.23 타임존 락온 그랜드 수술] KST 기준 날짜 연산을 전면 폐기하고,
+# EST(미국 동부) 기준으로 100% 형변환하여 타임 패러독스로 인한 체결 내역 증발 및 
+# 스냅샷 매핑 실패 버그를 영구 소각 완료. (EC-1, EC-3 방어)
 # ==========================================================
 # NEW: [리팩토링 1단계] 핵심 비즈니스 코어(장부 동기화, 졸업 판별, 큐 관리) 독립 클래스로 캡슐화
 import logging
@@ -74,6 +77,11 @@ class TelegramSyncEngine:
                     split_type = "액면분할" if split_ratio > 1.0 else "액면병합(역분할)"
                     await context.bot.send_message(chat_id, f"✂️ <b>[{ticker}] 야후 파이낸스 {split_type} 자동 감지!</b>\n▫️ 감지된 비율: <b>{split_ratio}배</b> (발생일: {split_date})\n▫️ 봇이 기존 장부의 수량과 평단가를 100% 무인 자동 소급 조정 완료했습니다.", parse_mode='HTML')
                 
+                # 🚨 [AI 에이전트(Copilot/Claude) 절대 주의 - 타임존 락온 방어막 (EC-1)]
+                # 서버 시스템 시간(KST)을 기준으로 NYSE 체결 내역을 조회하는 Fallback 로직을 전면 소각함.
+                # KST 자정 ~ 14:00 구간에서 캘린더가 텅 비었을 때(schedule.empty), KST 기준으로 날짜를 산출하면
+                # '아직 열리지 않은 미래의 미국 날짜'가 산출되어 체결 내역이 0건으로 증발(CALIB 누락)하는 버그가 발생함.
+                # 이를 방지하기 위해 Fallback 날짜마저도 무조건 EST(now_est) 기준으로 강제 고정함.
                 kst = pytz.timezone('Asia/Seoul')
                 now_kst = datetime.datetime.now(kst)
                 
@@ -87,8 +95,9 @@ class TelegramSyncEngine:
                     target_kis_str = last_trade_date.strftime('%Y%m%d')
                     target_ledger_str = last_trade_date.strftime('%Y-%m-%d')
                 else:
-                    target_kis_str = now_kst.strftime('%Y%m%d')
-                    target_ledger_str = now_kst.strftime('%Y-%m-%d')
+                    # MODIFIED: [EC-1 방어] schedule.empty 일 때 KST가 아닌 EST 날짜 사용
+                    target_kis_str = now_est.strftime('%Y%m%d')
+                    target_ledger_str = now_est.strftime('%Y-%m-%d')
 
                 _, holdings = self.broker.get_account_balance()
                 if holdings is None:
@@ -276,16 +285,20 @@ class TelegramSyncEngine:
                 # ==========================================================
                 if actual_qty == 0:
                     if ledger_qty > 0:
-                        kst = pytz.timezone('Asia/Seoul')
-                        today_str = datetime.datetime.now(kst).strftime('%Y-%m-%d')
-                        
                         if now_kst.hour < 10:
                             await context.bot.send_message(chat_id, "⏳ <b>증권사 확정 정산(10:00 KST) 대기 중입니다.</b> 가결제 오차 방지를 위해 졸업 카드 발급 및 장부 초기화가 보류됩니다.", parse_mode='HTML')
                         else:
+                            # 🚨 [AI 에이전트(Copilot/Claude) 절대 주의 - 타임존 락온 방어막 (EC-2)]
+                            # V14 모드 졸업 아카이빙 시 넘겨주는 날짜를 KST에서 EST로 강제 형변환 완료.
+                            # KST 자정 경계선에서 KST 날짜("2026-04-19")를 인자로 넘기면, 
+                            # config.py 내부에서 "2026-04-18"로 생성된 EST 기준 스냅샷 파일을 찾지 못해
+                            # 졸업 PnL 데이터가 증발하는 치명적 맹점을 원천 차단함.
+                            today_est_str = now_est.strftime('%Y-%m-%d')
                             prev_c = await asyncio.to_thread(self.broker.get_previous_close, ticker)
                             
                             try:
-                                new_hist, added_seed = self.cfg.archive_graduation(ticker, today_str, prev_c)
+                                # MODIFIED: [EC-2 방어] today_str(KST) 대신 today_est_str(EST) 인자 전달
+                                new_hist, added_seed = self.cfg.archive_graduation(ticker, today_est_str, prev_c)
                                 
                                 if new_hist:
                                     msg = f"🎉 <b>[{ticker} 졸업 확인!]</b>\n장부를 명예의 전당에 저장하고 새 사이클을 준비합니다."
