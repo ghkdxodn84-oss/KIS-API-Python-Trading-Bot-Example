@@ -5,6 +5,13 @@
 # 중복 반환할 때 발생하던 누적 합산(21+21=42) 맹점 전면 수술. 
 # 이종 거래소 분할 결제를 대비한 합산 로직은 유지하되, 동일한 수량과 
 # 평단가로 들어오는 '유령 중복 응답'은 무시하도록 멱등성 가드 이식.
+# MODIFIED: [V28.27 GCP 무한 대기 교착(Deadlock) 및 액면분할 에러 전면 수술]
+# 타임아웃(Timeout) 족쇄가 없어 GCP 환경에서 봇을 영원히 기절시키던 
+# yfinance의 fast_info 모듈을 전면 소각하고, 지연 발생 시 즉각 KIS API로 
+# 우회(Fallback)하도록 Safe-Casting 방어막 이식. 액면분할 파싱 에러(str) 완벽 픽스.
+# MODIFIED: [V28.28 yfinance 버전 호환 및 타임아웃 방어]
+# 최신 yfinance 라이브러리가 액면분할 날짜 키를 문자열(str)로 반환 시 
+# 발생하는 strftime 에러를 Timestamp 강제 변환 및 슬라이싱으로 완벽히 교정.
 # ==========================================================
 
 import requests
@@ -19,7 +26,8 @@ import tempfile
 import shutil  
 import pandas as pd   
 import numpy as np
-import volatility_engine as ve  
+import volatility_engine as ve
+import logging  # NEW: 예외 발생 시 침묵 방지를 위한 로깅 모듈 추가
 
 class KoreaInvestmentBroker:
     def __init__(self, app_key, app_secret, cano, acnt_prdt_cd="01"):
@@ -243,7 +251,6 @@ class KoreaInvestmentBroker:
                             
                             # MODIFIED: [V28.15 장부 뻥튀기 팩트 수술] KIS API가 동일 수량/동일 평단가의 데이터를 다른 거래소 응답으로 
                             # 한 번 더 보내는 경우(유령 중복 응답), 무지성으로 합산(+=)하지 않고 무시하도록 멱등성 필터링 이식.
-                            # 단, 수량이나 단가가 다르면 이종 거래소 분할 매수로 인정하여 정상 가중평균 병합 수행.
                             if prev['qty'] == qty and abs(prev['avg'] - avg) < 0.001:
                                 continue 
                                 
@@ -329,10 +336,10 @@ class KoreaInvestmentBroker:
     def get_current_price(self, ticker, is_market_closed=False):
         try:
             stock = yf.Ticker(ticker)
-            if is_market_closed: return float(stock.fast_info['last_price'])
+            # MODIFIED: [YF 무한 대기 방어] 타임아웃이 없는 fast_info 호출을 전면 소각하고 KIS API로 즉각 우회
             hist = stock.history(period="1d", interval="1m", prepost=True, timeout=5)
             if not hist.empty: return float(hist['Close'].iloc[-1])
-            else: return float(stock.fast_info['last_price'])
+            else: raise ValueError("YF 실시간 데이터 응답 지연 (timeout)") 
         except Exception as e:
             print(f"⚠️ [야후] 현재가 에러, 한투 API 우회 가동: {e}")
 
@@ -758,9 +765,15 @@ class KoreaInvestmentBroker:
                 else: safe_last_date = last_date_str
                     
                 for split_date_dt, ratio in splits.items():
-                    split_date = split_date_dt.strftime('%Y-%m-%d')
+                    # MODIFIED: [V28.28 yfinance 버전 호환] 최신 yfinance에서 날짜 키가 문자열로
+                    # 반환될 수 있으므로 Timestamp/str 양쪽을 모두 안전하게 처리.
+                    if isinstance(split_date_dt, str):
+                        split_date = split_date_dt[:10]
+                    else:
+                        split_date = pd.Timestamp(split_date_dt).strftime('%Y-%m-%d')
                     if split_date > safe_last_date: return float(ratio), split_date
-        except Exception as e: pass
+        except Exception as e:
+            logging.warning(f"⚠️ [야후 파이낸스] 액면분할 조회 에러: {e}")
         return 0.0, ""
 
     def get_dynamic_sniper_target(self, index_ticker):
@@ -793,8 +806,9 @@ class KoreaInvestmentBroker:
         try:
             stock = yf.Ticker(ticker)
             hist = stock.history(period="1d", interval="1m", prepost=True, timeout=5)
+            # MODIFIED: [YF 무한 대기 방어] 타임아웃 없는 fast_info 고/저가 호출 소각 및 KIS API 우회
             if not hist.empty: return float(hist['High'].max()), float(hist['Low'].min())
-            else: return float(stock.fast_info.get('dayHigh', 0.0)), float(stock.fast_info.get('dayLow', 0.0))
+            else: raise ValueError("YF 고가/저가 데이터 응답 지연 (timeout)")
         except Exception as e: pass
 
         try:

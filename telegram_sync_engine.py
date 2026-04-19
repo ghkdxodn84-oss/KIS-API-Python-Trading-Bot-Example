@@ -9,6 +9,9 @@
 # MODIFIED: [V28.23 타임존 락온 그랜드 수술] KST 기준 날짜 연산을 전면 폐기하고,
 # EST(미국 동부) 기준으로 100% 형변환하여 타임 패러독스로 인한 체결 내역 증발 및 
 # 스냅샷 매핑 실패 버그를 영구 소각 완료. (EC-1, EC-3 방어)
+# MODIFIED: [V28.28 tx_lock 영구 교착(Deadlock) 원천 차단] 
+# 야후 파이낸스 응답 지연 시 asyncio.to_thread가 tx_lock을 영구 점유하는 
+# 맹점을 10초 타임아웃으로 강제 차단하여 /sync 무한 대기 버그 완벽 수술.
 # ==========================================================
 # NEW: [리팩토링 1단계] 핵심 비즈니스 코어(장부 동기화, 졸업 판별, 큐 관리) 독립 클래스로 캡슐화
 import logging
@@ -69,7 +72,17 @@ class TelegramSyncEngine:
             async with self.tx_lock:
                 
                 last_split_date = self.cfg.get_last_split_date(ticker)
-                split_ratio, split_date = await asyncio.to_thread(self.broker.get_recent_stock_split, ticker, last_split_date)
+                
+                # MODIFIED: [V28.28 tx_lock 영구 교착(Deadlock) 원천 차단] 
+                # 야후 파이낸스 응답 지연 시 봇 전체가 멈추는 것을 방지하기 위해 10초 타임아웃 강제 적용
+                try:
+                    split_ratio, split_date = await asyncio.wait_for(
+                        asyncio.to_thread(self.broker.get_recent_stock_split, ticker, last_split_date),
+                        timeout=10.0
+                    )
+                except asyncio.TimeoutError:
+                    split_ratio, split_date = 0.0, ""
+                    logging.warning(f"⚠️ [{ticker}] 야후 파이낸스 액면분할 조회 타임아웃 (10초 초과), 이번 싱크에서 스킵")
                 
                 if split_ratio > 0.0 and split_date != "":
                     self.cfg.apply_stock_split(ticker, split_ratio)

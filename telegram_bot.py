@@ -13,6 +13,9 @@
 # MODIFIED: [V28.22 스냅샷 렌더링 디커플링 수술] 졸업 카드 목록에서 
 # 과거 내역을 조회할 때, 해당 내역의 고유 식별자(ID)를 뷰 엔진으로 
 # 100% 전달하도록 라우팅 배선(history_id=hid) 교정 완료.
+# MODIFIED: [V28.28 이벤트 루프 직접 차단(Blocking) 원천 방어]
+# /sync 핸들러 내부에서 get_account_balance() 동기 함수가 이벤트 루프를 
+# 영구 점유하던 치명적 버그를 asyncio.to_thread() 래핑으로 완벽 교정.
 # ==========================================================
 import logging
 import datetime
@@ -272,8 +275,9 @@ class TelegramController:
             
         await update.message.reply_text("🔄 시장 분석 및 지시서 작성 중...")
         
+        # MODIFIED: [V28.28 이벤트 루프 직접 차단 원천 방어] 동기 블로킹 호출을 asyncio.to_thread로 래핑.
         async with self.tx_lock:
-            cash, holdings = self.broker.get_account_balance()
+            cash, holdings = await asyncio.to_thread(self.broker.get_account_balance)
             
         if holdings is None:
             await update.message.reply_text("❌ KIS API 통신 오류로 계좌 정보를 불러올 수 없습니다. 잠시 후 다시 시도해주세요.")
