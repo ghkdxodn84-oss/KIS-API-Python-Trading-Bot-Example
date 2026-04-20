@@ -6,6 +6,7 @@
 # 덮어쓰는 순수 다이렉트 파일 I/O(Direct File I/O) 우회망 완벽 이식.
 # MODIFIED: [V28.25 동적 수수료율 텍스트 입력 라우터 수술] 
 # 사용자가 텔레그램 창에 입력한 수수료(%)를 파싱하여 config에 저장하는 CONF_FEE 상태 처리 로직 완벽 이식.
+# NEW: [V28.31] 텔레그램 하단 고정 키보드 텍스트 라우팅 복구 (코파일럿 방식 채택)
 # ==========================================================
 # NEW: [리팩토링 2단계] 유저 텍스트 입력 및 상태 기계(State Machine) 독립 클래스 분리
 import logging
@@ -37,7 +38,9 @@ class TelegramStates:
             return await controller.cmd_record(update, context)
         elif "명예의 전당" in text:
             return await controller.cmd_history(update, context)
-        elif "코어 스위칭" in text or "전술 설정" in text:
+        # 🚨 [수술 1: 코파일럿 방식 텍스트 키보드 버튼 라우팅 복구]
+        # "모드변환" 및 "분할변경" 키워드를 cmd_settlement로 다이렉트 라우팅
+        elif "코어 스위칭" in text or "전술 설정" in text or "모드변환" in text or "분할변경" in text:
             return await controller.cmd_settlement(update, context)
         elif "시드머니" in text or "시드 변경" in text or "시드 관리" in text:
             return await controller.cmd_seed(update, context)
@@ -163,7 +166,6 @@ class TelegramStates:
                 self.cfg.set_compound_rate(ticker, val)
                 await update.message.reply_text(f"✅ [{ticker}] 졸업 시 자동 복리율: {val}%")
 
-            # NEW: [V28.25] 사용자가 입력한 수수료율 처리 라우터
             elif state.startswith("CONF_FEE"):
                 if val < 0.0 or val > 10.0:
                     return await update.message.reply_text("🚨 <b>오입력 차단:</b> 수수료율은 0.0% ~ 10.0% 사이여야 합니다.", parse_mode='HTML')

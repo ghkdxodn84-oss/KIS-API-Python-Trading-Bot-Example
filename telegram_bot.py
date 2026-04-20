@@ -16,6 +16,7 @@
 # MODIFIED: [V28.28 이벤트 루프 직접 차단(Blocking) 원천 방어]
 # /sync 핸들러 내부에서 get_account_balance() 동기 함수가 이벤트 루프를 
 # 영구 점유하던 치명적 버그를 asyncio.to_thread() 래핑으로 완벽 교정.
+# NEW: [V28.31] 하단 고정 키보드 한글 신호 무응답 맹점 완벽 수술 (라우팅 복구)
 # ==========================================================
 import logging
 import datetime
@@ -143,6 +144,27 @@ class TelegramController:
         await self.callbacks_handler.handle_callback(update, context, self)
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        # 🚨 [수술 1: 텔레그램 하단 고정 키보드 텍스트 신호 무응답 맹점 완벽 수술]
+        if not self._is_admin(update):
+            return
+            
+        text = update.message.text
+        
+        # user_states 대기열에 막혀 증발하던 키보드 텍스트 신호를 다이렉트 패스(Direct Pass)로 우회 개통
+        if "장부 조회" in text:
+            return await self.cmd_record(update, context)
+        elif "시드 변경" in text:
+            return await self.cmd_seed(update, context)
+        elif "모드 전환" in text:
+            return await self.cmd_ticker(update, context)
+        elif "분할 변경" in text or "환경 설정" in text or "세팅" in text:
+            return await self.cmd_settlement(update, context)
+        elif "스나이퍼" in text:
+            return await self.cmd_mode(update, context)
+        elif "명예의 전당" in text or "졸업" in text:
+            return await self.cmd_history(update, context)
+            
+        # 일반 입력 상태(user_states) 처리 라우터로 위임
         await self.states_handler.handle_message(update, context, self)
 
     async def cmd_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
