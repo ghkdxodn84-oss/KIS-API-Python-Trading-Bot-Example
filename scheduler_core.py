@@ -1,5 +1,5 @@
 # ==========================================================
-# [scheduler_core.py] - 🌟 100% 통합 완성본 (V27.25) 🌟
+# [scheduler_core.py] - 🌟 100% 통합 완성본 (V27.26) 🌟
 # ⚠️ 이 주석 및 파일명 표기는 절대 지우지 마세요.
 # 💡 [V24.09 패치] API 결측치(None) 방어용 Safe Casting 전면 이식 완료
 # 💡 [V24.10 수술] V_REV 동적 에스크로 차감 방어 (이중 차감 방지)
@@ -9,6 +9,7 @@
 # 🚨 [V27.21 그랜드 수술] 5분 정산 윈도우 확장, TOCTOU 락온, 일반 종목 예산 누수 방어, Fail-Open 차단 및 Orphan 주문 초기화 보류(Skip) 이식 완비
 # 🚀 [V27.24 그랜드 수술] 타임 패러독스 원천 차단! 08:30 동기화를 10:00 KST 확정 정산 시간으로 자동 시프트(Shift)하는 스마트 딜레이 엔진 탑재
 # 🚀 [V27.25 그랜드 수술] 서머타임 데드락 해제, 잔고 조회 API 병목(O(N)->O(1)) 격상, 계절변경 Fail-Open 맹점 영구 적출
+# 🛠️ [V27.26 긴급 패치] 17시 잔고 조회 시 증권사 API의 빈 리스트([]) 응답으로 인한 '.get' 에러(크래시) 원천 차단 방어막 이식
 # ==========================================================
 import os
 import logging
@@ -170,7 +171,6 @@ async def scheduled_force_reset(context):
     
     diff = min((now_minutes - target_minutes) % 1440, (target_minutes - now_minutes) % 1440)
     
-    # MODIFIED: [치명적 오류 1 해결] 서머타임 변경(1시간) 시 스케줄러 오차를 포용하도록 하드스탑 락을 65분으로 완화 (데드락 방어)
     if diff > 65:
         return
         
@@ -194,9 +194,11 @@ async def scheduled_force_reset(context):
         msg_addons = ""
         HARD_STOP_THRESHOLDS = {"TQQQ": -15.0, "SOXL": -20.0}
         
-        # MODIFIED: [치명적 오류 2 해결] 루프 내부에서 불필요하게 반복 호출되던 전체 계좌 잔고 조회를 루프 외부로 1단계 격상하여 O(1) 호출로 최적화
         async with tx_lock:
             _, holdings_snap = await asyncio.to_thread(broker.get_account_balance)
+            
+        # 🛠️ [V27.26 수술 핵심] 증권사 API가 빈 딕셔너리({}) 대신 빈 리스트([])를 던지는 고질적 버그를 완벽히 튕겨내는 타입 세이프 쉴드
+        safe_holdings = holdings_snap if isinstance(holdings_snap, dict) else {}
             
         for t in cfg.get_active_tickers():
             rev_state = cfg.get_reverse_state(t)
@@ -205,7 +207,8 @@ async def scheduled_force_reset(context):
                 async with tx_lock:
                     curr_p = await asyncio.to_thread(broker.get_current_price, t)
                 
-                h_data = (holdings_snap or {}).get(t) or {}
+                # 에러 진원지 완벽 해결: 리스트([])에서는 get을 시도하지 않고 안전한 딕셔너리에서만 조회
+                h_data = safe_holdings.get(t) or {}
                 actual_avg = float(h_data.get('avg') or 0.0)
                 curr_p = float(curr_p or 0.0)
                 
@@ -260,12 +263,9 @@ async def delayed_auto_sync(context):
     await run_auto_sync(context, "10:00")
 
 async def scheduled_auto_sync_summer(context):
-    # MODIFIED: [치명적 오류 3 해결] 계절 변경 시 동기화가 영구 누락되는 Fail-Open 방어막 적출
-    
     kst = pytz.timezone('Asia/Seoul')
     now = datetime.datetime.now(kst)
     
-    # 🚨 10시 이전(08:30)에 깨어났다면, 10시 정각에 다시 일어나도록 알람(Snooze)을 맞추고 수면
     if now.hour < 10:
         target_time = now.replace(hour=10, minute=0, second=0, microsecond=0)
         delay = (target_time - now).total_seconds()
@@ -276,8 +276,6 @@ async def scheduled_auto_sync_summer(context):
     await run_auto_sync(context, "10:00")
 
 async def scheduled_auto_sync_winter(context):
-    # MODIFIED: [치명적 오류 3 해결] 계절 변경 시 동기화가 영구 누락되는 Fail-Open 방어막 적출
-    
     kst = pytz.timezone('Asia/Seoul')
     now = datetime.datetime.now(kst)
     

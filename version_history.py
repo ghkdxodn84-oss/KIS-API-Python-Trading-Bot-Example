@@ -248,5 +248,6 @@ VERSION_HISTORY = [
     "V28.30 [2026.04.20] 🚨 [애프터마켓 로터리 덫 휴장일 오발탄(False Fire) 엣지 케이스 원천 차단]: 주말 및 미국 증시 휴장일 새벽(05:05 KST)에 애프터마켓 덫 스케줄러가 나홀로 기상하여 KIS 서버에 주문을 난사하고 에러 스팸을 타전하던 맹점(Missing Guard) 완벽 수술. 스케줄러 진입 최상단에 is_market_open() 바이패스 쉴드를 이식하여 불필요한 API 거절 및 시각적 노이즈를 100% 절단 완료 (수정: scheduler_trade)",
     "V28.31 [2026.04.20] 🚨 [V14 상방 스나이퍼 코어 통합 및 아키텍처 팩트 수술]: 1) 텔레그램 하단 고정 키보드 텍스트 무응답 맹점 다이렉트 라우팅 복구(코파일럿 방식 채택). 2) V14 전용 오리지널 상방 스나이퍼(잭팟/트레일링 쿼터 익절) 코어 엔진 100% 스케줄러 이식. 3) 자전거래 및 로직 충돌을 막기 위한 V-REV 상방 스나이퍼 락다운(Lock-down) 원상 복구 및 ON/OFF 팩트 동기화 완료 (수정: telegram_states, telegram_callbacks, scheduler_trade)",
     "V28.32 [2026.04.20] 🚨 [스나이퍼 로직 충돌 방어막 복구]: 코파일럿 아키텍처 채택. V14 전용 상방 스나이퍼 로직 충돌 방지를 위해 V-REV 모드에서의 락다운 방어막 원상 복구 완료 (수정: telegram_callbacks)",
-    "V28.33 [2026.04.20] 🚨 [TQQQ V-REV 횡단 진입 맹점 100% 소각]: telegram_view 및 telegram_callbacks에 SOXL 전용 하드웨어 락온(Lock-on) 방어막을 핀셋 이식하여 타 종목의 V-REV 전환 시도를 원천 차단하고 팩트 기반 경고 팝업을 출력하도록 수술 완료 (수정: telegram_view, telegram_callbacks)"
+    "V28.33 [2026.04.20] 🚨 [TQQQ V-REV 횡단 진입 맹점 100% 소각]: telegram_view 및 telegram_callbacks에 SOXL 전용 하드웨어 락온(Lock-on) 방어막을 핀셋 이식하여 타 종목의 V-REV 전환 시도를 원천 차단하고 팩트 기반 경고 팝업을 출력하도록 수술 완료 (수정: telegram_view, telegram_callbacks)",
+    "V28.34 [2026.04.20] 🚨 [17시 잔고 스캔 API 크래시(List 타입 반환) 완벽 방어 및 타입 세이프 쉴드 이식]: 증권사 API가 무포지션(0주)이거나 서버 점검 시 빈 딕셔너리({}) 대신 빈 리스트([])를 반환하여 발생하던 치명적 런타임 붕괴('list' object has no attribute 'get') 엣지 케이스 원천 차단. holdings_snap 데이터에 `isinstance` 기반 강제 타입 검증 락온을 걸어, 리스트가 유입되더라도 빈 딕셔너리로 치환하여 스케줄러가 100% 안정적으로 구동되도록 아키텍처 대수술 완료 (수정: scheduler_core)"
 ]
