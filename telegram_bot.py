@@ -444,7 +444,7 @@ class TelegramController:
                     if not is_manual_vwap:
                         snap_avg = cached_snap.get('avg_price', actual_avg)
                         target_jackpot = round(snap_avg * 1.01, 2)
-                        v_rev_guidance += f" 🎯 [전체 잭팟] ${target_jackpot:.2f} 돌파 시 <b>{logic_qty}주</b> (옵션)\n"
+                        v_rev_guidance += f" 🎯 [전체 잭팟] ${target_jackpot:.2f} <b>{logic_qty}주</b> (옵션)\n"
                 
                 elif q_list and logic_qty > 0:
                     l1_qty = q_list[-1].get('qty', 0)
